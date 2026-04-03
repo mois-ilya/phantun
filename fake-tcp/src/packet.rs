@@ -127,6 +127,10 @@ pub fn build_tcp_packet(
     ip_buf.freeze()
 }
 
+// TODO(security): panics on empty/short buffers instead of returning None.
+// buf[0] index panics on empty input; .unwrap() panics when buffer has valid
+// IP header but is too short for TCP. Malformed packet can crash the process.
+// See #[should_panic] tests in this file. Fix before stealth TCP work.
 pub fn parse_ip_packet(buf: &Bytes) -> Option<(IPPacket<'_>, tcp::TcpPacket<'_>)> {
     if buf[0] >> 4 == 4 {
         let v4 = ipv4::Ipv4Packet::new(buf).unwrap();
