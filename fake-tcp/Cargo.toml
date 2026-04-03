@@ -13,7 +13,7 @@ packet oriented tunneling with minimum overhead.
 
 [features]
 benchmark = []
-integration-tests = []
+integration-tests = ["nix"]
 
 [dependencies]
 bytes = "1"
@@ -24,6 +24,4 @@ tokio-tun = "0"
 flume = "0"
 tokio = { workspace = true }
 log = { workspace = true }
-
-[dev-dependencies]
-nix = { version = "0.30", features = ["sched"] }
+nix = { version = "0.30", features = ["sched"], optional = true }
