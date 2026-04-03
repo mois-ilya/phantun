@@ -69,13 +69,13 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 1: Add StealthLevel enum and --stealth CLI flag
 
-- [ ] Create `StealthLevel` enum in `fake-tcp/src/lib.rs`: `Off(0)`, `Basic(1)`, `Standard(2)`, `Full(3)`
-- [ ] Implement `From<u8>` for StealthLevel with clamping
-- [ ] Add `stealth: StealthLevel` field to `Stack` and `Socket`
-- [ ] Thread `stealth` through `Stack::new()` → `Socket::new()` → `Socket::build_tcp_packet()`
-- [ ] Add `--stealth <LEVEL>` arg to `client.rs` and `server.rs` CLI (default: 0)
-- [ ] Write tests: StealthLevel parsing, default behavior, clamping
-- [ ] Run `cargo test` — all pass, `--stealth 0` behaves identically to current code
+- [x] Create `StealthLevel` enum in `fake-tcp/src/lib.rs`: `Off(0)`, `Basic(1)`, `Standard(2)`, `Full(3)`
+- [x] Implement `From<u8>` for StealthLevel with clamping
+- [x] Add `stealth: StealthLevel` field to `Stack` and `Socket`
+- [x] Thread `stealth` through `Stack::new()` → `Socket::new()` → `Socket::build_tcp_packet()`
+- [x] Add `--stealth <LEVEL>` arg to `client.rs` and `server.rs` CLI (default: 0)
+- [x] Write tests: StealthLevel parsing, default behavior, clamping
+- [x] Run `cargo test` — all pass, `--stealth 0` behaves identically to current code
 
 ### Task 2: Random ISN (Level 1)
 

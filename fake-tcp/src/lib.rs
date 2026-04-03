@@ -59,6 +59,29 @@ use tokio::sync::mpsc;
 use tokio::time;
 use tokio_tun::Tun;
 
+/// Stealth level controlling TCP fingerprint realism.
+///
+/// Each level includes all behaviors of previous levels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StealthLevel {
+    #[default]
+    Off = 0,      // current behavior, byte-compatible
+    Basic = 1,    // fix hard signatures (ISN, SYN fingerprint, timestamps)
+    Standard = 2, // stateful mimicry (dynamic window, frequent ACK, ts_ecr)
+    Full = 3,     // advanced (dup ACK, send window, congestion)
+}
+
+impl From<u8> for StealthLevel {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => StealthLevel::Off,
+            1 => StealthLevel::Basic,
+            2 => StealthLevel::Standard,
+            _ => StealthLevel::Full, // clamp anything >= 3 to Full
+        }
+    }
+}
+
 const TIMEOUT: time::Duration = time::Duration::from_secs(1);
 const RETRIES: usize = 6;
 const MPMC_BUFFER_LEN: usize = 512;
@@ -86,6 +109,7 @@ struct Shared {
     tun: Vec<Arc<Tun>>,
     ready: mpsc::Sender<Socket>,
     tuples_purge: broadcast::Sender<AddrTuple>,
+    stealth: StealthLevel,
 }
 
 pub struct Stack {
@@ -112,6 +136,7 @@ pub struct Socket {
     ack: AtomicU32,
     last_ack: AtomicU32,
     state: State,
+    stealth: StealthLevel,
 }
 
 /// A socket that represents a unique TCP connection between a server and client.
@@ -129,6 +154,7 @@ impl Socket {
         remote_addr: SocketAddr,
         ack: Option<u32>,
         state: State,
+        stealth: StealthLevel,
     ) -> (Socket, flume::Sender<Bytes>) {
         let (incoming_tx, incoming_rx) = flume::bounded(MPMC_BUFFER_LEN);
 
@@ -143,6 +169,7 @@ impl Socket {
                 ack: AtomicU32::new(ack.unwrap_or(0)),
                 last_ack: AtomicU32::new(ack.unwrap_or(0)),
                 state,
+                stealth,
             },
             incoming_tx,
         )
@@ -361,7 +388,12 @@ impl Stack {
     /// When more than one [`Tun`](tokio_tun::Tun) object is passed in, same amount
     /// of reader will be spawned later. This allows user to utilize the performance
     /// benefit of Multiqueue Tun support on machines with SMP.
-    pub fn new(tun: Vec<Tun>, local_ip: Ipv4Addr, local_ip6: Option<Ipv6Addr>) -> Stack {
+    pub fn new(
+        tun: Vec<Tun>,
+        local_ip: Ipv4Addr,
+        local_ip6: Option<Ipv6Addr>,
+        stealth: StealthLevel,
+    ) -> Stack {
         let tun: Vec<Arc<Tun>> = tun.into_iter().map(Arc::new).collect();
         let (ready_tx, ready_rx) = mpsc::channel(MPSC_BUFFER_LEN);
         let (tuples_purge_tx, _tuples_purge_rx) = broadcast::channel(16);
@@ -371,6 +403,7 @@ impl Stack {
             listening: RwLock::new(HashSet::new()),
             ready: ready_tx,
             tuples_purge: tuples_purge_tx.clone(),
+            stealth,
         });
 
         for t in tun {
@@ -433,6 +466,7 @@ impl Stack {
                     addr,
                     None,
                     State::Idle,
+                    self.shared.stealth,
                 );
 
                 assert!(tuples.insert(tuple, incoming).is_none());
@@ -511,6 +545,7 @@ impl Stack {
                                         remote_addr,
                                         Some(tcp_packet.get_sequence() + 1),
                                         State::Idle,
+                                        shared.stealth,
                                     );
                                     assert!(shared
                                         .tuples
@@ -556,5 +591,60 @@ impl Stack {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stealth_level_from_u8_valid_values() {
+        assert_eq!(StealthLevel::from(0), StealthLevel::Off);
+        assert_eq!(StealthLevel::from(1), StealthLevel::Basic);
+        assert_eq!(StealthLevel::from(2), StealthLevel::Standard);
+        assert_eq!(StealthLevel::from(3), StealthLevel::Full);
+    }
+
+    #[test]
+    fn test_stealth_level_from_u8_clamping() {
+        assert_eq!(StealthLevel::from(4), StealthLevel::Full);
+        assert_eq!(StealthLevel::from(10), StealthLevel::Full);
+        assert_eq!(StealthLevel::from(255), StealthLevel::Full);
+    }
+
+    #[test]
+    fn test_stealth_level_default() {
+        let level: StealthLevel = Default::default();
+        assert_eq!(level, StealthLevel::Off);
+    }
+
+    #[test]
+    fn test_stealth_level_ordering() {
+        assert!(StealthLevel::Off < StealthLevel::Basic);
+        assert!(StealthLevel::Basic < StealthLevel::Standard);
+        assert!(StealthLevel::Standard < StealthLevel::Full);
+    }
+
+    #[test]
+    fn test_stealth_level_comparison_gte() {
+        assert!(StealthLevel::Full >= StealthLevel::Basic);
+        assert!(StealthLevel::Standard >= StealthLevel::Standard);
+        assert!(!(StealthLevel::Off >= StealthLevel::Basic));
+    }
+
+    #[test]
+    fn test_stealth_level_copy_clone() {
+        let a = StealthLevel::Basic;
+        let b = a; // Copy
+        let c = a.clone(); // Clone
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+    }
+
+    #[test]
+    fn test_stealth_level_debug() {
+        assert_eq!(format!("{:?}", StealthLevel::Off), "Off");
+        assert_eq!(format!("{:?}", StealthLevel::Full), "Full");
     }
 }
