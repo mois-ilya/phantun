@@ -162,14 +162,14 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 11: Congestion simulation (Level 3)
 
-- [ ] Write test: initial sends have gradually increasing burst size (slow start behavior)
-- [ ] Write test: after stable period, sending rate stabilizes (congestion avoidance)
-- [ ] Add to Socket: `cwnd: AtomicU32` (congestion window), `ssthresh: AtomicU32`
-- [ ] Implement minimal slow start: cwnd starts small, doubles each RTT estimate until ssthresh
-- [ ] Implement minimal congestion avoidance: cwnd grows linearly after ssthresh
-- [ ] On triple dup ACK: halve cwnd (multiplicative decrease)
-- [ ] This is the most performance-impacting change — document overhead in benchmarks
-- [ ] Run `cargo test` — all pass
+- [x] Write test: initial sends have gradually increasing burst size (slow start behavior)
+- [x] Write test: after stable period, sending rate stabilizes (congestion avoidance)
+- [x] Add to Socket: `cwnd: AtomicU32` (congestion window), `ssthresh: AtomicU32`
+- [x] Implement minimal slow start: cwnd starts small, doubles each RTT estimate until ssthresh
+- [x] Implement minimal congestion avoidance: cwnd grows linearly after ssthresh
+- [x] On triple dup ACK: halve cwnd (multiplicative decrease)
+- [x] This is the most performance-impacting change — document overhead in benchmarks
+- [x] Run `cargo test` — all 111 tests pass
 
 ### Task 12: Verify acceptance criteria
 

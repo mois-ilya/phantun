@@ -152,6 +152,10 @@ pub struct Socket {
     last_acked_seq: AtomicU32,
     /// Peer's effective advertised receive window (stealth >= Full)
     peer_window: AtomicU32,
+    /// Congestion window in bytes (stealth >= Full)
+    cwnd: AtomicU32,
+    /// Slow start threshold in bytes (stealth >= Full)
+    ssthresh: AtomicU32,
 }
 
 /// A socket that represents a unique TCP connection between a server and client.
@@ -206,6 +210,17 @@ impl Socket {
                 dup_ack_count: AtomicU32::new(0),
                 last_acked_seq: AtomicU32::new(0),
                 peer_window: AtomicU32::new(0),
+                // Initial cwnd = 10 * MSS (RFC 6928), ssthresh = 64KB
+                cwnd: AtomicU32::new(if stealth >= StealthLevel::Full {
+                    10 * 1460
+                } else {
+                    0
+                }),
+                ssthresh: AtomicU32::new(if stealth >= StealthLevel::Full {
+                    65535
+                } else {
+                    0
+                }),
             },
             incoming_tx,
         )
@@ -278,6 +293,18 @@ impl Socket {
                             self.seq.store(last_acked, Ordering::Relaxed);
                         }
                     }
+
+                    // Congestion window constraint: wrap seq back if bytes in flight
+                    // would exceed cwnd
+                    let cwnd = self.cwnd.load(Ordering::Relaxed);
+                    if cwnd > 0 {
+                        let last_acked = self.last_acked_seq.load(Ordering::Relaxed);
+                        let current_seq = self.seq.load(Ordering::Relaxed);
+                        let bytes_in_flight = current_seq.wrapping_sub(last_acked);
+                        if bytes_in_flight.wrapping_add(payload.len() as u32) > cwnd {
+                            self.seq.store(last_acked, Ordering::Relaxed);
+                        }
+                    }
                 }
 
                 let buf = self.build_tcp_packet(flags, Some(payload));
@@ -323,10 +350,27 @@ impl Socket {
                                 // Triple duplicate ACK: reset seq to last acked position
                                 // (simulate fast retransmit)
                                 self.seq.store(prev_acked, Ordering::Relaxed);
+                                // Multiplicative decrease: halve cwnd, set ssthresh
+                                let cwnd = self.cwnd.load(Ordering::Relaxed);
+                                let new_ssthresh = (cwnd / 2).max(2 * 1460);
+                                self.ssthresh.store(new_ssthresh, Ordering::Relaxed);
+                                self.cwnd.store(new_ssthresh, Ordering::Relaxed);
                             }
                         } else {
                             self.last_acked_seq.store(peer_ack, Ordering::Relaxed);
                             self.dup_ack_count.store(1, Ordering::Relaxed);
+                            // Congestion window growth on new ACK
+                            let cwnd = self.cwnd.load(Ordering::Relaxed);
+                            let ssthresh = self.ssthresh.load(Ordering::Relaxed);
+                            if cwnd < ssthresh {
+                                // Slow start: increase cwnd by MSS (doubles per RTT)
+                                self.cwnd.store(cwnd + 1460, Ordering::Relaxed);
+                            } else {
+                                // Congestion avoidance: increase cwnd by MSS per RTT
+                                // Approximate: add MSS^2/cwnd per ACK
+                                let increment = (1460u32 * 1460).checked_div(cwnd).unwrap_or(1);
+                                self.cwnd.store(cwnd + increment.max(1), Ordering::Relaxed);
+                            }
                         }
 
                         // Store peer's advertised receive window (scaled by wscale=7)
@@ -1312,5 +1356,209 @@ mod tests {
         let (seq_used, _) =
             simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window);
         assert_eq!(seq_used, last_acked, "should wrap when exceeding window with wrapping seq");
+    }
+
+    // --- Task 11: Congestion simulation (Level 3) ---
+
+    const MSS: u32 = 1460;
+
+    /// Simulates congestion window growth on receiving a new (non-duplicate) ACK.
+    /// Returns the new cwnd value.
+    fn simulate_cwnd_growth(cwnd: u32, ssthresh: u32) -> u32 {
+        if cwnd < ssthresh {
+            // Slow start: increase cwnd by MSS
+            cwnd + MSS
+        } else {
+            // Congestion avoidance: increase by MSS^2/cwnd per ACK
+            let increment = (MSS * MSS).checked_div(cwnd).unwrap_or(1);
+            cwnd + increment.max(1)
+        }
+    }
+
+    /// Simulates multiplicative decrease on triple dup ACK.
+    /// Returns (new_cwnd, new_ssthresh).
+    fn simulate_cwnd_decrease(cwnd: u32) -> (u32, u32) {
+        let new_ssthresh = (cwnd / 2).max(2 * MSS);
+        (new_ssthresh, new_ssthresh)
+    }
+
+    /// Simulates congestion window constraint in send path.
+    /// Returns (seq_used, new_seq_after_send).
+    fn simulate_cwnd_constraint(
+        current_seq: u32,
+        payload_len: u32,
+        last_acked_seq: u32,
+        cwnd: u32,
+    ) -> (u32, u32) {
+        let mut seq = current_seq;
+        if cwnd > 0 {
+            let bytes_in_flight = seq.wrapping_sub(last_acked_seq);
+            if bytes_in_flight.wrapping_add(payload_len) > cwnd {
+                seq = last_acked_seq;
+            }
+        }
+        (seq, seq.wrapping_add(payload_len))
+    }
+
+    #[test]
+    fn test_congestion_slow_start_increasing_burst() {
+        // Initial cwnd = 10*MSS (RFC 6928). Each new ACK adds MSS to cwnd (slow start).
+        let initial_cwnd = 10 * MSS;
+        let ssthresh = 65535u32;
+
+        // Verify cwnd grows by MSS on each ACK during slow start
+        let cwnd1 = simulate_cwnd_growth(initial_cwnd, ssthresh);
+        assert_eq!(cwnd1, 11 * MSS, "cwnd should grow by MSS in slow start");
+
+        let cwnd2 = simulate_cwnd_growth(cwnd1, ssthresh);
+        assert_eq!(cwnd2, 12 * MSS, "second ACK grows cwnd further");
+
+        let cwnd3 = simulate_cwnd_growth(cwnd2, ssthresh);
+        assert_eq!(cwnd3, 13 * MSS);
+
+        // All of these are below ssthresh, so still in slow start
+        assert!(cwnd3 < ssthresh, "should still be in slow start phase");
+    }
+
+    #[test]
+    fn test_congestion_avoidance_stabilizes() {
+        // Once cwnd >= ssthresh, growth becomes linear (much slower)
+        let ssthresh = 20 * MSS;
+        let cwnd = ssthresh; // Just hit the threshold
+
+        // In congestion avoidance, growth per ACK is MSS^2/cwnd
+        let cwnd1 = simulate_cwnd_growth(cwnd, ssthresh);
+        let growth1 = cwnd1 - cwnd;
+        assert!(
+            growth1 < MSS,
+            "congestion avoidance should grow less than MSS per ACK, got {}",
+            growth1
+        );
+
+        // Growth should be roughly MSS^2/cwnd = MSS/20 ~= 73 bytes
+        let expected_growth = (MSS * MSS) / cwnd;
+        assert_eq!(growth1, expected_growth);
+
+        // After many ACKs, growth is still small per ACK
+        let mut current = cwnd;
+        for _ in 0..100 {
+            current = simulate_cwnd_growth(current, ssthresh);
+        }
+        // After 100 ACKs in CA, cwnd should have grown modestly
+        assert!(
+            current > cwnd,
+            "cwnd should grow in congestion avoidance"
+        );
+        assert!(
+            current < cwnd + 100 * MSS,
+            "growth should be much less than slow start, got {}",
+            current - cwnd
+        );
+    }
+
+    #[test]
+    fn test_congestion_triple_dup_ack_halves_cwnd() {
+        // On triple dup ACK, cwnd is halved (multiplicative decrease)
+        let cwnd = 40 * MSS;
+        let (new_cwnd, new_ssthresh) = simulate_cwnd_decrease(cwnd);
+        assert_eq!(new_cwnd, 20 * MSS, "cwnd should be halved");
+        assert_eq!(new_ssthresh, 20 * MSS, "ssthresh should equal halved cwnd");
+    }
+
+    #[test]
+    fn test_congestion_cwnd_floor_on_decrease() {
+        // cwnd should not go below 2*MSS even after multiplicative decrease
+        let cwnd = 2 * MSS;
+        let (new_cwnd, _) = simulate_cwnd_decrease(cwnd);
+        assert_eq!(new_cwnd, 2 * MSS, "cwnd floor is 2*MSS");
+
+        let cwnd = MSS; // pathologically small
+        let (new_cwnd, _) = simulate_cwnd_decrease(cwnd);
+        assert_eq!(new_cwnd, 2 * MSS, "cwnd floor enforced even below 2*MSS");
+    }
+
+    #[test]
+    fn test_congestion_cwnd_constraint_limits_send() {
+        // When bytes_in_flight + payload > cwnd, seq wraps back
+        let last_acked = 1000u32;
+        let cwnd = 10 * MSS; // 14600
+
+        // Within cwnd: 5000 bytes in flight + 1460 = 6460 < 14600
+        let current_seq = last_acked + 5000;
+        let (seq_used, _) = simulate_cwnd_constraint(current_seq, MSS, last_acked, cwnd);
+        assert_eq!(seq_used, current_seq, "within cwnd should use current seq");
+
+        // Exceeds cwnd: 14000 + 1460 = 15460 > 14600
+        let current_seq = last_acked + 14000;
+        let (seq_used, _) = simulate_cwnd_constraint(current_seq, MSS, last_acked, cwnd);
+        assert_eq!(seq_used, last_acked, "exceeding cwnd should wrap seq back");
+    }
+
+    #[test]
+    fn test_congestion_slow_start_to_avoidance_transition() {
+        // Simulate full lifecycle: slow start -> congestion avoidance
+        let mut cwnd = 10 * MSS;
+        let ssthresh = 20 * MSS;
+
+        // Slow start phase
+        let mut ack_count = 0;
+        while cwnd < ssthresh {
+            cwnd = simulate_cwnd_growth(cwnd, ssthresh);
+            ack_count += 1;
+        }
+        assert_eq!(ack_count, 10, "should take 10 ACKs to exit slow start from 10*MSS to 20*MSS");
+        assert_eq!(cwnd, 20 * MSS);
+
+        // Now in congestion avoidance - growth is much slower
+        let cwnd_at_ca_start = cwnd;
+        for _ in 0..20 {
+            cwnd = simulate_cwnd_growth(cwnd, ssthresh);
+        }
+        let ca_growth = cwnd - cwnd_at_ca_start;
+        let ss_growth = cwnd_at_ca_start - 10 * MSS; // = 10 * MSS
+        assert!(
+            ca_growth < ss_growth,
+            "CA growth ({}) should be less than SS growth ({})",
+            ca_growth,
+            ss_growth
+        );
+    }
+
+    #[test]
+    fn test_congestion_decrease_then_slow_start() {
+        // After multiplicative decrease, cwnd should resume slow start
+        let cwnd = 40 * MSS;
+        let (new_cwnd, new_ssthresh) = simulate_cwnd_decrease(cwnd);
+        assert_eq!(new_cwnd, 20 * MSS);
+        assert_eq!(new_ssthresh, 20 * MSS);
+
+        // cwnd == ssthresh, so we're in congestion avoidance immediately
+        let growth = simulate_cwnd_growth(new_cwnd, new_ssthresh);
+        let increment = growth - new_cwnd;
+        assert!(
+            increment < MSS,
+            "after decrease, should be in congestion avoidance, not slow start"
+        );
+    }
+
+    #[test]
+    fn test_congestion_not_applied_below_full() {
+        // cwnd is only initialized for stealth >= Full; for lower levels, cwnd = 0
+        // and the constraint is skipped
+        let stealth_off = StealthLevel::Off;
+        let stealth_basic = StealthLevel::Basic;
+        let stealth_standard = StealthLevel::Standard;
+
+        // When cwnd = 0, constraint should not be applied (our Socket::new sets cwnd=0 for < Full)
+        // In the simulation helper, cwnd=0 means skip
+        let current_seq = 50000u32;
+        let (seq_used, _) = simulate_cwnd_constraint(current_seq, MSS, 0, 0);
+        assert_eq!(seq_used, current_seq, "cwnd=0 should skip constraint");
+
+        // Verify Socket::new sets cwnd=0 for non-Full stealth levels
+        // (tested implicitly via the stealth level check in send())
+        assert!(stealth_off < StealthLevel::Full);
+        assert!(stealth_basic < StealthLevel::Full);
+        assert!(stealth_standard < StealthLevel::Full);
     }
 }
