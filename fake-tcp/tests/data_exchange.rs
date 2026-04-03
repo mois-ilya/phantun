@@ -77,11 +77,13 @@ async fn test_send_server_to_client() {
 /// Test: seq increments by payload.len() after each send.
 ///
 /// Post-handshake, both sides have seq=1.  After sending a payload of length L,
-/// the sender's seq becomes 1+L.  This is verified implicitly: the second send
-/// uses seq=1+L; if seq were NOT incremented, the server would see two packets
-/// with the same seq and — because fake-tcp uses ack = seq + payload_len — would
-/// set ack = 1+L both times, making the state inconsistent.  The fact that both
-/// payloads arrive correctly confirms seq tracking is correct.
+/// the sender's seq becomes 1+L.  This test verifies that two consecutive sends
+/// both deliver their payloads correctly.
+///
+/// Limitation: fake-tcp's receive path does not validate incoming seq values
+/// (it routes by address tuple only), so this test would still pass even if
+/// seq stopped incrementing.  Direct seq-on-the-wire verification would require
+/// raw packet capture, which is deferred to wire-fingerprint tests.
 #[tokio::test]
 async fn test_seq_increments_by_payload_len() {
     let (client_sock, server_sock, _env) = connected_pair().await;
@@ -115,10 +117,14 @@ async fn test_seq_increments_by_payload_len() {
 ///
 /// When the server recvs a payload from the client, it sets its internal ack to
 /// client_seq + payload.len().  The server then uses that ack value in its next
-/// outgoing packet.  We verify this end-to-end: the server's reply must reach
-/// the client successfully, which is only possible if the server's ack was set
-/// correctly (otherwise the client would see a mismatched ack and discard the
-/// packet or close the connection).
+/// outgoing packet.  We verify this end-to-end by confirming the server can
+/// recv then send a reply that the client receives correctly.
+///
+/// Limitation: fake-tcp's receive path does not enforce incoming ack values
+/// (it only checks for RST), so a stale or incorrect ack would still be
+/// accepted by the client.  This test confirms the recv-then-send flow works,
+/// but would not catch a broken ack update.  Direct ack verification would
+/// require raw packet capture.
 #[tokio::test]
 async fn test_ack_updates_after_recv() {
     let (client_sock, server_sock, _env) = connected_pair().await;
@@ -134,10 +140,9 @@ async fn test_ack_updates_after_recv() {
         .expect("server recv returned None");
     assert_eq!(&buf[..n], payload as &[u8], "server received wrong data");
 
-    // Server now sends back; its ACK field must reflect the updated ack.
-    // If the ack were stale the client Stack would still accept it (fake-tcp
-    // does not enforce strict ack ordering on receipt), but the round-trip
-    // completing confirms the server side is operational after the recv.
+    // Server sends back after having recv'd.  This confirms the server side
+    // is operational after recv, but does not verify the ack value on the wire
+    // (see doc comment above).
     let reply = b"ack-reply";
     server_sock.send(reply).await.expect("server send failed");
 
@@ -152,8 +157,11 @@ async fn test_ack_updates_after_recv() {
 /// Test: multiple sequential sends accumulate seq correctly.
 ///
 /// Sends five payloads of different sizes from client to server and verifies
-/// that all are received in order with correct content.  Correct receipt is
-/// only possible if seq accumulates properly (seq += payload.len() per send).
+/// that all are received in order with correct content.
+///
+/// Limitation: same as `test_seq_increments_by_payload_len` — payload delivery
+/// does not depend on correct seq values in fake-tcp's current implementation,
+/// so this test verifies data flow rather than seq arithmetic on the wire.
 #[tokio::test]
 async fn test_multiple_sequential_sends_accumulate_seq() {
     let (client_sock, server_sock, _env) = connected_pair().await;

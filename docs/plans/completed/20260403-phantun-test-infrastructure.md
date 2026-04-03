@@ -16,7 +16,7 @@ Wire fingerprint tests (raw packet capture) deferred to the fork implementation 
 
 1. `cargo test -p fake-tcp` passes on macOS (unit tests)
 2. `docker run --privileged phantun-test` passes (integration tests)
-3. All current behavioral invariants documented as test assertions
+3. All current behavioral invariants documented as test assertions (seq/ack wire-level values not directly asserted — fake-tcp's recv path does not validate them; documented in test comments, deferred to wire-fingerprint tests)
 4. Zero production `.rs` code changes (only `Cargo.toml` feature flag + test files + Docker infrastructure)
 
 ## Context
@@ -169,9 +169,9 @@ Wire fingerprint tests (raw packet capture) deferred to the fork implementation 
 - [x] Gate with `#![cfg(feature = "integration-tests")]`
 - [x] Test: send data client→server, verify received correctly
 - [x] Test: send data server→client, verify received correctly
-- [x] Test: seq increments by payload.len() after each send (post-handshake seq starts at 1)
-- [x] Test: ack updates to remote_seq + payload.len() after recv
-- [x] Test: multiple sequential sends accumulate seq correctly
+- [x] Test: consecutive sends deliver correctly (exercises seq increment path, but does not verify seq values on the wire — see test doc comments)
+- [x] Test: recv-then-send flow works (exercises ack update path, but does not verify ack values on the wire — see test doc comments)
+- [x] Test: multiple sequential sends deliver in order (exercises seq accumulation, but does not verify seq values on the wire)
 - [x] Run in Docker — all pass [x] manual test (skipped - Docker daemon not running in this environment)
 
 ### Task 9: Add CI integration

@@ -99,10 +99,21 @@ fn create_tun_in_netns(
         tx.send(tuns).unwrap();
     });
 
-    let tuns = rx.recv().expect("TUN-creation thread panicked before sending");
-    // Join the thread to propagate any panic with its original message.
-    handle_thread.join().expect("TUN-creation thread panicked");
-    tuns
+    match rx.recv() {
+        Ok(tuns) => {
+            // Thread succeeded; join to clean up.
+            handle_thread.join().expect("TUN-creation thread panicked");
+            tuns
+        }
+        Err(_) => {
+            // Channel closed without a message — the thread panicked before
+            // tx.send().  Join to propagate the original panic payload.
+            match handle_thread.join() {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(()) => panic!("TUN-creation thread exited without sending"),
+            }
+        }
+    }
 }
 
 // ── public test environment ──────────────────────────────────────────────────
