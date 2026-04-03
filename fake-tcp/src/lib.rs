@@ -54,6 +54,7 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc, RwLock,
 };
+use std::time::Instant;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::time;
@@ -137,6 +138,12 @@ pub struct Socket {
     last_ack: AtomicU32,
     state: State,
     stealth: StealthLevel,
+    /// Epoch for computing ts_val (stealth >= Basic)
+    ts_epoch: Instant,
+    /// Random offset added to ts_val to avoid leaking uptime (stealth >= Basic)
+    ts_offset: u32,
+    /// Last received peer tsval, echoed back as ts_ecr (stealth >= Basic)
+    ts_ecr: AtomicU32,
 }
 
 /// A socket that represents a unique TCP connection between a server and client.
@@ -174,9 +181,25 @@ impl Socket {
                 last_ack: AtomicU32::new(ack.unwrap_or(0)),
                 state,
                 stealth,
+                ts_epoch: Instant::now(),
+                ts_offset: if stealth >= StealthLevel::Basic {
+                    rand::random::<u32>()
+                } else {
+                    0
+                },
+                ts_ecr: AtomicU32::new(0),
             },
             incoming_tx,
         )
+    }
+
+    /// Compute the current ts_val from elapsed time + random offset
+    fn current_ts_val(&self) -> u32 {
+        if self.stealth >= StealthLevel::Basic {
+            (self.ts_epoch.elapsed().as_millis() as u32).wrapping_add(self.ts_offset)
+        } else {
+            0
+        }
     }
 
     fn build_tcp_packet(&self, flags: u8, payload: Option<&[u8]>) -> Bytes {
@@ -191,6 +214,8 @@ impl Socket {
             flags,
             payload,
             self.stealth,
+            self.current_ts_val(),
+            self.ts_ecr.load(Ordering::Relaxed),
         )
     }
 
@@ -228,6 +253,13 @@ impl Socket {
                     if (tcp_packet.get_flags() & tcp::TcpFlags::RST) != 0 {
                         info!("Connection {} reset by peer", self);
                         return None;
+                    }
+
+                    // Update ts_ecr with peer's tsval from incoming packet
+                    if self.stealth >= StealthLevel::Basic
+                        && let Some(peer_tsval) = parse_tcp_timestamp(&tcp_packet)
+                    {
+                        self.ts_ecr.store(peer_tsval, Ordering::Relaxed);
                     }
 
                     let payload = tcp_packet.payload();
@@ -274,6 +306,13 @@ impl Socket {
                             return;
                         }
 
+                        // Update ts_ecr from handshake ACK
+                        if self.stealth >= StealthLevel::Basic
+                            && let Some(peer_tsval) = parse_tcp_timestamp(&tcp_packet)
+                        {
+                            self.ts_ecr.store(peer_tsval, Ordering::Relaxed);
+                        }
+
                         if tcp_packet.get_flags() == tcp::TcpFlags::ACK
                             && tcp_packet.get_acknowledgement()
                                 == self.seq.load(Ordering::Relaxed) + 1
@@ -316,6 +355,13 @@ impl Socket {
 
                             if (tcp_packet.get_flags() & tcp::TcpFlags::RST) != 0 {
                                 return None;
+                            }
+
+                            // Update ts_ecr from SYN+ACK
+                            if self.stealth >= StealthLevel::Basic
+                                && let Some(peer_tsval) = parse_tcp_timestamp(&tcp_packet)
+                            {
+                                self.ts_ecr.store(peer_tsval, Ordering::Relaxed);
                             }
 
                             if tcp_packet.get_flags() == tcp::TcpFlags::SYN | tcp::TcpFlags::ACK
@@ -368,6 +414,8 @@ impl Drop for Socket {
             tcp::TcpFlags::RST,
             None,
             self.stealth,
+            self.current_ts_val(),
+            0, // RST doesn't need ts_ecr
         );
         if let Err(e) = self.tun.try_send(&buf) {
             warn!("Unable to send RST to remote end: {}", e);
@@ -570,6 +618,7 @@ impl Stack {
                                         tcp::TcpFlags::RST | tcp::TcpFlags::ACK,
                                         None,
                                         StealthLevel::Off,
+                                        0, 0,
                                     );
                                     shared.tun[0].try_send(&buf).unwrap();
                                 }
@@ -583,6 +632,7 @@ impl Stack {
                                     tcp::TcpFlags::RST | tcp::TcpFlags::ACK,
                                     None,
                                     StealthLevel::Off,
+                                    0, 0,
                                 );
                                 shared.tun[0].try_send(&buf).unwrap();
                             }

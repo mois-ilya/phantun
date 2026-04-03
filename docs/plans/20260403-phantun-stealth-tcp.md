@@ -98,14 +98,14 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 4: Timestamps state in Socket (Level 1)
 
-- [ ] Write tests: timestamps increment monotonically on successive packets
-- [ ] Write test: ts_ecr = 0 on first SYN, then echoes peer's tsval after receiving
-- [ ] Add to Socket: `ts_val: AtomicU32` (local timestamp counter), `ts_ecr: AtomicU32` (last received peer tsval)
-- [ ] Initialize `ts_val` from `Instant::now()` converted to ms-granularity counter
-- [ ] In `build_tcp_packet()`: when stealth >= 1, always include NOP+NOP+Timestamps(tsval, tsecr) — 12 bytes, doff=8 for non-SYN
-- [ ] In recv path (`reader_task` or `Socket::recv()`): parse incoming TCP timestamps, update `ts_ecr`
-- [ ] Increment `ts_val` based on elapsed time (not per-packet, to avoid timing attacks)
-- [ ] Run `cargo test` — all pass
+- [x] Write tests: timestamps increment monotonically on successive packets
+- [x] Write test: ts_ecr = 0 on first SYN, then echoes peer's tsval after receiving
+- [x] Add to Socket: `ts_val: AtomicU32` (local timestamp counter), `ts_ecr: AtomicU32` (last received peer tsval)
+- [x] Initialize `ts_val` from `Instant::now()` converted to ms-granularity counter
+- [x] In `build_tcp_packet()`: when stealth >= 1, always include NOP+NOP+Timestamps(tsval, tsecr) — 12 bytes, doff=8 for non-SYN
+- [x] In recv path (`reader_task` or `Socket::recv()`): parse incoming TCP timestamps, update `ts_ecr`
+- [x] Increment `ts_val` based on elapsed time (not per-packet, to avoid timing attacks)
+- [x] Run `cargo test` — all pass
 
 ### Task 5: PSH flag on data packets (Level 1)
 
