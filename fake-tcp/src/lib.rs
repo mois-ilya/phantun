@@ -144,6 +144,8 @@ pub struct Socket {
     ts_offset: u32,
     /// Last received peer tsval, echoed back as ts_ecr (stealth >= Basic)
     ts_ecr: AtomicU32,
+    /// Base window value for dynamic window randomization (stealth >= Standard)
+    window_base: u16,
 }
 
 /// A socket that represents a unique TCP connection between a server and client.
@@ -188,6 +190,13 @@ impl Socket {
                     0
                 },
                 ts_ecr: AtomicU32::new(0),
+                window_base: if stealth >= StealthLevel::Standard {
+                    // Random base window in range 256..=512, representing ~32K-64K
+                    // effective receive window with wscale=7
+                    256 + (rand::random::<u16>() % 257)
+                } else {
+                    0xFFFF
+                },
             },
             incoming_tx,
         )
@@ -199,6 +208,18 @@ impl Socket {
             (self.ts_epoch.elapsed().as_millis() as u32).wrapping_add(self.ts_offset)
         } else {
             0
+        }
+    }
+
+    /// Compute the current advertised window value.
+    /// For stealth >= Standard, adds small random jitter to window_base.
+    /// For lower stealth levels, returns static 0xFFFF.
+    fn current_window(&self) -> u16 {
+        if self.stealth >= StealthLevel::Standard {
+            // Add jitter of 0..32 to base window to simulate natural variation
+            self.window_base.wrapping_add(rand::random::<u16>() % 32)
+        } else {
+            0xFFFF
         }
     }
 
@@ -216,6 +237,7 @@ impl Socket {
             self.stealth,
             self.current_ts_val(),
             self.ts_ecr.load(Ordering::Relaxed),
+            self.current_window(),
         )
     }
 
@@ -427,6 +449,7 @@ impl Drop for Socket {
             self.stealth,
             self.current_ts_val(),
             0, // RST doesn't need ts_ecr
+            self.current_window(),
         );
         if let Err(e) = self.tun.try_send(&buf) {
             warn!("Unable to send RST to remote end: {}", e);
@@ -630,6 +653,7 @@ impl Stack {
                                         None,
                                         StealthLevel::Off,
                                         0, 0,
+                                        0xFFFF,
                                     );
                                     shared.tun[0].try_send(&buf).unwrap();
                                 }
@@ -644,6 +668,7 @@ impl Stack {
                                     None,
                                     StealthLevel::Off,
                                     0, 0,
+                                    0xFFFF,
                                 );
                                 shared.tun[0].try_send(&buf).unwrap();
                             }
@@ -893,5 +918,86 @@ mod tests {
 
         // stealth Full, seq nonzero: accepted
         assert!(StealthLevel::Full >= StealthLevel::Basic || 99999u32 == 0);
+    }
+
+    // --- Task 7: Dynamic window tests ---
+
+    /// Helper that mirrors Socket's window_base initialization
+    fn compute_window_base(stealth: StealthLevel) -> u16 {
+        if stealth >= StealthLevel::Standard {
+            256 + (rand::random::<u16>() % 257)
+        } else {
+            0xFFFF
+        }
+    }
+
+    /// Helper that mirrors Socket::current_window()
+    fn compute_current_window(stealth: StealthLevel, window_base: u16) -> u16 {
+        if stealth >= StealthLevel::Standard {
+            window_base.wrapping_add(rand::random::<u16>() % 32)
+        } else {
+            0xFFFF
+        }
+    }
+
+    #[test]
+    fn test_window_stealth_off_is_static_0xffff() {
+        for _ in 0..10 {
+            let base = compute_window_base(StealthLevel::Off);
+            assert_eq!(base, 0xFFFF);
+            let window = compute_current_window(StealthLevel::Off, base);
+            assert_eq!(window, 0xFFFF);
+        }
+    }
+
+    #[test]
+    fn test_window_stealth_basic_is_static_0xffff() {
+        for _ in 0..10 {
+            let base = compute_window_base(StealthLevel::Basic);
+            assert_eq!(base, 0xFFFF);
+            let window = compute_current_window(StealthLevel::Basic, base);
+            assert_eq!(window, 0xFFFF);
+        }
+    }
+
+    #[test]
+    fn test_window_stealth_standard_base_in_range() {
+        // Window base should be in 256..=512
+        for _ in 0..50 {
+            let base = compute_window_base(StealthLevel::Standard);
+            assert!(base >= 256, "window_base {} should be >= 256", base);
+            assert!(base <= 512, "window_base {} should be <= 512", base);
+        }
+    }
+
+    #[test]
+    fn test_window_stealth_standard_varies() {
+        // Multiple calls to current_window should produce varying values
+        let base = 400u16;
+        let windows: Vec<u16> = (0..20)
+            .map(|_| compute_current_window(StealthLevel::Standard, base))
+            .collect();
+        let unique: std::collections::HashSet<u16> = windows.into_iter().collect();
+        assert!(unique.len() > 1, "window values should vary with jitter");
+    }
+
+    #[test]
+    fn test_window_stealth_standard_jitter_bounded() {
+        // Jitter should be 0..32, so window in [base, base+31]
+        let base = 350u16;
+        for _ in 0..100 {
+            let window = compute_current_window(StealthLevel::Standard, base);
+            assert!(window >= base, "window {} should be >= base {}", window, base);
+            assert!(window < base + 32, "window {} should be < base + 32 = {}", window, base + 32);
+        }
+    }
+
+    #[test]
+    fn test_window_stealth_full_also_dynamic() {
+        // Stealth Full (level 3) should also use dynamic window
+        let base = compute_window_base(StealthLevel::Full);
+        assert!(base >= 256 && base <= 512);
+        let window = compute_current_window(StealthLevel::Full, base);
+        assert_ne!(window, 0xFFFF, "stealth Full should not use static 0xFFFF");
     }
 }

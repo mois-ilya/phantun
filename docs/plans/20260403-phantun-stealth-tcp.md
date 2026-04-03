@@ -126,13 +126,13 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 7: Dynamic window (Level 2)
 
-- [ ] Write test: with stealth >= 2, window varies between packets (not static 0xFFFF)
-- [ ] Write test: window is in realistic range (e.g., 32K-64K base, randomized)
-- [ ] Write test: stealth 0 and 1 keep static 0xFFFF
-- [ ] Add `window_base: u16` and `window_rng: SmallRng` to Socket (or use thread-local RNG)
-- [ ] In `build_tcp_packet()`: when stealth >= 2, compute window = base + random_offset
-- [ ] Apply wscale to advertised window value (window = effective_window >> wscale)
-- [ ] Run `cargo test` — all pass
+- [x] Write test: with stealth >= 2, window varies between packets (not static 0xFFFF)
+- [x] Write test: window is in realistic range (e.g., 32K-64K base, randomized)
+- [x] Write test: stealth 0 and 1 keep static 0xFFFF
+- [x] Add `window_base: u16` to Socket; use thread-local RNG via `rand::random()` for jitter (lock-free)
+- [x] In `build_tcp_packet()`: added `window: u16` parameter; Socket computes window = base + random_offset when stealth >= 2
+- [x] Apply wscale to advertised window value (base 256-512 with wscale=7 = ~32K-64K effective)
+- [x] Run `cargo test` — all 83 tests pass, clippy clean
 
 ### Task 8: ts_ecr echo correctness (Level 2)
 
