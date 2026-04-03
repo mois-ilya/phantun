@@ -24,3 +24,6 @@ tokio-tun = "0"
 flume = "0"
 tokio = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+nix = { version = "0.30", features = ["sched"] }

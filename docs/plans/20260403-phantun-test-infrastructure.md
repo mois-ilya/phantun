@@ -141,14 +141,14 @@ Wire fingerprint tests (raw packet capture) deferred to the fork implementation 
 **Files:**
 - Create: `fake-tcp/tests/common/mod.rs`
 
-- [ ] Helper to create network namespace (`ip netns add`)
-- [ ] Helper to create veth pair connecting two namespaces
-- [ ] Helper to create and configure TUN inside a namespace (using `setns()` in a dedicated thread, then returning fd)
-- [ ] Helper to set up ip routes + `ip_forward=1` inside each namespace
-- [ ] Helper to create client+server Stack pair: client Stack with `local_ip=tun_peer`, server Stack with `local_ip=tun_local`
-- [ ] Cleanup helper (delete namespaces on drop)
-- [ ] Gate entire file with `#![cfg(feature = "integration-tests")]`
-- [ ] Verify compiles in Docker: `docker run --privileged phantun-test cargo test -p fake-tcp --features integration-tests --no-run`
+- [x] Helper to create network namespace (`ip netns add`)
+- [x] Helper to create veth pair connecting two namespaces
+- [x] Helper to create and configure TUN inside a namespace (using `setns()` in a dedicated thread, then returning fd)
+- [x] Helper to set up ip routes + `ip_forward=1` inside each namespace
+- [x] Helper to create client+server Stack pair: client Stack with `local_ip=tun_peer`, server Stack with `local_ip=tun_local`
+- [x] Cleanup helper (delete namespaces on drop)
+- [x] Gate entire file with `#![cfg(feature = "integration-tests")]`
+- [x] Verify compiles in Docker: `CARGO_HOME=/workspace/.cargo cargo test -p fake-tcp --features integration-tests --no-run` passes on Linux
 
 ### Task 7: Integration tests — handshake
 
