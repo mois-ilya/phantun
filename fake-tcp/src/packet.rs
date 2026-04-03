@@ -413,6 +413,121 @@ mod tests {
         assert_eq!(tcp_pkt.get_acknowledgement(), ack);
         assert_eq!(tcp_pkt.payload(), payload);
     }
+
+    // --- Task 4: parse_ip_packet() and round-trip ---
+
+    #[test]
+    fn test_roundtrip_ipv4_syn() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let seq = 0x12345678u32;
+        let ack = 0u32;
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None);
+        let (ip_pkt, tcp_pkt) = parse_ip_packet(&pkt).unwrap();
+        assert_eq!(ip_pkt.get_source(), IpAddr::V4("10.0.0.1".parse().unwrap()));
+        assert_eq!(ip_pkt.get_destination(), IpAddr::V4("10.0.0.2".parse().unwrap()));
+        assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::SYN);
+        assert_eq!(tcp_pkt.get_sequence(), seq);
+        assert_eq!(tcp_pkt.get_acknowledgement(), ack);
+        assert_eq!(tcp_pkt.get_data_offset(), 6);
+        assert_eq!(tcp_pkt.get_window(), 0xFFFF);
+        let opts = tcp_pkt.get_options_raw();
+        assert_eq!(opts[0], 1);  // NOP
+        assert_eq!(opts[1], 3);  // wscale kind
+        assert_eq!(opts[2], 3);  // wscale length
+        assert_eq!(opts[3], 14); // wscale shift
+    }
+
+    #[test]
+    fn test_roundtrip_ipv4_data() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let seq = 100u32;
+        let ack = 200u32;
+        let payload = b"roundtrip data";
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload));
+        let (ip_pkt, tcp_pkt) = parse_ip_packet(&pkt).unwrap();
+        assert_eq!(ip_pkt.get_source(), IpAddr::V4("10.0.0.1".parse().unwrap()));
+        assert_eq!(ip_pkt.get_destination(), IpAddr::V4("10.0.0.2".parse().unwrap()));
+        assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::ACK);
+        assert_eq!(tcp_pkt.get_sequence(), seq);
+        assert_eq!(tcp_pkt.get_acknowledgement(), ack);
+        assert_eq!(tcp_pkt.payload(), payload as &[u8]);
+    }
+
+    #[test]
+    fn test_roundtrip_ipv6_syn() {
+        let local: SocketAddr = "[fd00::1]:9000".parse().unwrap();
+        let remote: SocketAddr = "[fd00::2]:9001".parse().unwrap();
+        let seq = 0xABCDu32;
+        let ack = 0u32;
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None);
+        let (ip_pkt, tcp_pkt) = parse_ip_packet(&pkt).unwrap();
+        assert_eq!(ip_pkt.get_source(), IpAddr::V6("fd00::1".parse().unwrap()));
+        assert_eq!(ip_pkt.get_destination(), IpAddr::V6("fd00::2".parse().unwrap()));
+        assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::SYN);
+        assert_eq!(tcp_pkt.get_sequence(), seq);
+        assert_eq!(tcp_pkt.get_acknowledgement(), ack);
+        assert_eq!(tcp_pkt.get_data_offset(), 6);
+        assert_eq!(tcp_pkt.get_window(), 0xFFFF);
+    }
+
+    #[test]
+    fn test_roundtrip_ipv6_data() {
+        let local: SocketAddr = "[fd00::1]:9000".parse().unwrap();
+        let remote: SocketAddr = "[fd00::2]:9001".parse().unwrap();
+        let seq = 50u32;
+        let ack = 60u32;
+        let payload = b"ipv6 roundtrip";
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload));
+        let (ip_pkt, tcp_pkt) = parse_ip_packet(&pkt).unwrap();
+        assert_eq!(ip_pkt.get_source(), IpAddr::V6("fd00::1".parse().unwrap()));
+        assert_eq!(ip_pkt.get_destination(), IpAddr::V6("fd00::2".parse().unwrap()));
+        assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::ACK);
+        assert_eq!(tcp_pkt.get_sequence(), seq);
+        assert_eq!(tcp_pkt.get_acknowledgement(), ack);
+        assert_eq!(tcp_pkt.payload(), payload as &[u8]);
+    }
+
+    #[test]
+    fn test_parse_non_tcp_ipv4_returns_none() {
+        // IPv4 header with protocol=UDP(17) — parse_ip_packet must return None
+        let mut buf = vec![0u8; 28];
+        buf[0] = 0x45; // version=4, IHL=5
+        buf[8] = 64;   // TTL
+        buf[9] = 17;   // protocol = UDP, not TCP
+        let bytes = Bytes::copy_from_slice(&buf);
+        assert!(parse_ip_packet(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_parse_unknown_ip_version_returns_none() {
+        // First nibble = 5 (not 4 or 6) — parse_ip_packet must return None
+        let mut buf = vec![0u8; 40];
+        buf[0] = 0x50; // version=5
+        let bytes = Bytes::copy_from_slice(&buf);
+        assert!(parse_ip_packet(&bytes).is_none());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_parse_panics_on_empty_buffer() {
+        let bytes = Bytes::new();
+        parse_ip_packet(&bytes);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_parse_panics_on_ipv4_too_short_for_tcp() {
+        // 20-byte buffer with version=4 and protocol=TCP but no TCP header
+        // TcpPacket::new on empty slice unwraps None → panics
+        let mut buf = vec![0u8; 20];
+        buf[0] = 0x45; // version=4, IHL=5
+        buf[8] = 64;   // TTL
+        buf[9] = 6;    // TCP
+        let bytes = Bytes::copy_from_slice(&buf);
+        parse_ip_packet(&bytes);
+    }
 }
 
 #[cfg(all(test, feature = "benchmark"))]

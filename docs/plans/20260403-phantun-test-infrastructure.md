@@ -110,15 +110,15 @@ Wire fingerprint tests (raw packet capture) deferred to the fork implementation 
 **Files:**
 - Modify: `fake-tcp/src/packet.rs`
 
-- [ ] Test round-trip IPv4 SYN: build → parse → verify all TCP fields match
-- [ ] Test round-trip IPv4 data: build → parse → verify payload, seq, ack, flags
-- [ ] Test round-trip IPv6 SYN: build → parse → verify all fields
-- [ ] Test round-trip IPv6 data: build → parse → verify payload
-- [ ] Test parse with non-TCP IPv4 protocol returns None (set protocol to UDP in crafted IP header)
-- [ ] Test parse with unknown IP version (not 4, not 6) returns None
-- [ ] Test parse panics on empty buffer — `#[should_panic]`
-- [ ] Test parse panics on valid IPv4 header but too short for TCP — `#[should_panic]`
-- [ ] Run `cargo test -p fake-tcp` — all pass
+- [x] Test round-trip IPv4 SYN: build → parse → verify all TCP fields match
+- [x] Test round-trip IPv4 data: build → parse → verify payload, seq, ack, flags
+- [x] Test round-trip IPv6 SYN: build → parse → verify all fields
+- [x] Test round-trip IPv6 data: build → parse → verify payload
+- [x] Test parse with non-TCP IPv4 protocol returns None (set protocol to UDP in crafted IP header)
+- [x] Test parse with unknown IP version (not 4, not 6) returns None
+- [x] Test parse panics on empty buffer — `#[should_panic]`
+- [x] Test parse panics on valid IPv4 header but too short for TCP — `#[should_panic]`
+- [x] Run `cargo test -p fake-tcp` — all pass
 
 ### Task 5: Create Dockerfile.test and .dockerignore
 
