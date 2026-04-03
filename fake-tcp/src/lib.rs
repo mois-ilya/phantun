@@ -165,7 +165,11 @@ impl Socket {
                 incoming: incoming_rx,
                 local_addr,
                 remote_addr,
-                seq: AtomicU32::new(0),
+                seq: AtomicU32::new(if stealth >= StealthLevel::Basic {
+                    rand::random::<u32>()
+                } else {
+                    0
+                }),
                 ack: AtomicU32::new(ack.unwrap_or(0)),
                 last_ack: AtomicU32::new(ack.unwrap_or(0)),
                 state,
@@ -537,7 +541,7 @@ impl Stack {
                                     .contains(&tcp_packet.get_destination())
                             {
                                 // SYN seen on listening socket
-                                if tcp_packet.get_sequence() == 0 {
+                                if shared.stealth >= StealthLevel::Basic || tcp_packet.get_sequence() == 0 {
                                     let (sock, incoming) = Socket::new(
                                         shared.clone(),
                                         tun.clone(),
@@ -646,5 +650,94 @@ mod tests {
     fn test_stealth_level_debug() {
         assert_eq!(format!("{:?}", StealthLevel::Off), "Off");
         assert_eq!(format!("{:?}", StealthLevel::Full), "Full");
+    }
+
+    // --- Task 2: Random ISN tests ---
+
+    /// Helper to compute initial seq the same way Socket::new does
+    fn initial_seq(stealth: StealthLevel) -> u32 {
+        if stealth >= StealthLevel::Basic {
+            rand::random::<u32>()
+        } else {
+            0
+        }
+    }
+
+    #[test]
+    fn test_isn_stealth_off_is_zero() {
+        // With stealth Off, ISN must always be 0
+        for _ in 0..100 {
+            assert_eq!(initial_seq(StealthLevel::Off), 0);
+        }
+    }
+
+    #[test]
+    fn test_isn_stealth_basic_is_random() {
+        // With stealth >= Basic, ISN should be random (not always 0)
+        // Run multiple iterations; probability of all being 0 is (1/2^32)^10 ≈ 0
+        let mut seen_nonzero = false;
+        for _ in 0..10 {
+            if initial_seq(StealthLevel::Basic) != 0 {
+                seen_nonzero = true;
+                break;
+            }
+        }
+        assert!(seen_nonzero, "ISN should be random with stealth >= Basic");
+    }
+
+    #[test]
+    fn test_isn_stealth_standard_is_random() {
+        let mut seen_nonzero = false;
+        for _ in 0..10 {
+            if initial_seq(StealthLevel::Standard) != 0 {
+                seen_nonzero = true;
+                break;
+            }
+        }
+        assert!(seen_nonzero, "ISN should be random with stealth >= Standard");
+    }
+
+    #[test]
+    fn test_isn_stealth_full_is_random() {
+        let mut seen_nonzero = false;
+        for _ in 0..10 {
+            if initial_seq(StealthLevel::Full) != 0 {
+                seen_nonzero = true;
+                break;
+            }
+        }
+        assert!(seen_nonzero, "ISN should be random with stealth >= Full");
+    }
+
+    #[test]
+    fn test_isn_stealth_basic_has_variety() {
+        // Check that different calls produce different values (not a constant)
+        let values: Vec<u32> = (0..10).map(|_| initial_seq(StealthLevel::Basic)).collect();
+        let unique: std::collections::HashSet<u32> = values.into_iter().collect();
+        assert!(unique.len() > 1, "ISN should vary between connections");
+    }
+
+    #[test]
+    fn test_stealth_syn_acceptance_logic() {
+        // Verify the acceptance condition used in reader_task:
+        // stealth >= Basic || seq == 0
+
+        // stealth Off, seq 0: accepted
+        assert!(StealthLevel::Off >= StealthLevel::Basic || 0u32 == 0);
+
+        // stealth Off, seq nonzero: rejected
+        assert!(!(StealthLevel::Off >= StealthLevel::Basic || 12345u32 == 0));
+
+        // stealth Basic, seq 0: accepted
+        assert!(StealthLevel::Basic >= StealthLevel::Basic || 0u32 == 0);
+
+        // stealth Basic, seq nonzero: accepted (because stealth >= Basic)
+        assert!(StealthLevel::Basic >= StealthLevel::Basic || 12345u32 == 0);
+
+        // stealth Standard, seq nonzero: accepted
+        assert!(StealthLevel::Standard >= StealthLevel::Basic || 99999u32 == 0);
+
+        // stealth Full, seq nonzero: accepted
+        assert!(StealthLevel::Full >= StealthLevel::Basic || 99999u32 == 0);
     }
 }

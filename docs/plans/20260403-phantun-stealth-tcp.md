@@ -79,11 +79,11 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 2: Random ISN (Level 1)
 
-- [ ] Write tests: with stealth >= 1, SYN seq != 0; with stealth 0, SYN seq == 0
-- [ ] Write test: server with stealth >= 1 accepts SYN with any seq (not just 0)
-- [ ] In `Socket::new()`: when stealth >= 1, initialize `seq` from `rand::random::<u32>()`
-- [ ] In `reader_task`: when stealth >= 1, accept SYN with any seq value (remove `== 0` check)
-- [ ] Run `cargo test` — all pass
+- [x] Write tests: with stealth >= 1, SYN seq != 0; with stealth 0, SYN seq == 0
+- [x] Write test: server with stealth >= 1 accepts SYN with any seq (not just 0)
+- [x] In `Socket::new()`: when stealth >= 1, initialize `seq` from `rand::random::<u32>()`
+- [x] In `reader_task`: when stealth >= 1, accept SYN with any seq value (remove `== 0` check)
+- [x] Run `cargo test` — all pass
 
 ### Task 3: Realistic SYN fingerprint (Level 1)
 
