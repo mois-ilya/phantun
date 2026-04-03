@@ -153,12 +153,12 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 10: Send window constraint (Level 3)
 
-- [ ] Write test: send-side seq does not advance beyond peer's advertised window
-- [ ] Write test: when window is exhausted, seq wraps back to acked position
-- [ ] Add to Socket: `peer_window: AtomicU32` (parsed from incoming packets)
-- [ ] In `Socket::send()`: check if `seq + payload_len` exceeds `last_acked_seq + peer_window`
-- [ ] If exceeds: wrap seq back to `last_acked_seq` (like udp2raw seq_mode 3)
-- [ ] Run `cargo test` — all pass
+- [x] Write test: send-side seq does not advance beyond peer's advertised window
+- [x] Write test: when window is exhausted, seq wraps back to acked position
+- [x] Add to Socket: `peer_window: AtomicU32` (parsed from incoming packets)
+- [x] In `Socket::send()`: check if `seq + payload_len` exceeds `last_acked_seq + peer_window`
+- [x] If exceeds: wrap seq back to `last_acked_seq` (like udp2raw seq_mode 3)
+- [x] Run `cargo test` — all pass
 
 ### Task 11: Congestion simulation (Level 3)
 
