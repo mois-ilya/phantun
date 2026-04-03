@@ -134,12 +134,12 @@ claude_args = --dangerously-skip-permissions --output-format stream-json --verbo
 # session_timeout: maximum duration for a single claude session
 # kills hanging sessions (e.g., agent started a blocking operation)
 # uses Go duration format (e.g., "30m", "1h", "1h30m")
-session_timeout = 30m
+session_timeout = 1h
 
 # idle_timeout: kill claude session after no output for this duration
 # unlike session_timeout (fixed wall-clock limit), idle timeout resets on each
 # output line and only fires when the session goes silent
-idle_timeout = 10m
+idle_timeout = 20m
 
 # ------------------------------------------------------------------------------
 # paths
