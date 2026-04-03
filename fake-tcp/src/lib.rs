@@ -813,14 +813,14 @@ mod tests {
     fn test_stealth_level_comparison_gte() {
         assert!(StealthLevel::Full >= StealthLevel::Basic);
         assert!(StealthLevel::Standard >= StealthLevel::Standard);
-        assert!(!(StealthLevel::Off >= StealthLevel::Basic));
+        assert!(StealthLevel::Off < StealthLevel::Basic);
     }
 
     #[test]
     fn test_stealth_level_copy_clone() {
         let a = StealthLevel::Basic;
         let b = a; // Copy
-        let c = a.clone(); // Clone
+        let c = a; // Clone (Copy trait)
         assert_eq!(a, b);
         assert_eq!(a, c);
     }
@@ -1085,7 +1085,7 @@ mod tests {
     fn test_window_stealth_full_also_dynamic() {
         // Stealth Full (level 3) should also use dynamic window
         let base = compute_window_base(StealthLevel::Full);
-        assert!(base >= 256 && base <= 512);
+        assert!((256..=512).contains(&base));
         let window = compute_current_window(StealthLevel::Full, base);
         assert_ne!(window, 0xFFFF, "stealth Full should not use static 0xFFFF");
     }
