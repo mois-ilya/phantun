@@ -19,3 +19,18 @@ jobs:
       run: cargo clippy --verbose
     - name: Build
       run: cargo build --verbose
+    - name: Unit tests
+      run: cargo test --workspace
+
+  integration:
+
+    runs-on: ubuntu-latest
+    # Note: --privileged is required for network namespace creation.
+    # GitHub Actions ubuntu-latest runners support privileged Docker containers.
+
+    steps:
+    - uses: actions/checkout@v5
+    - name: Build integration test image
+      run: docker build -f Dockerfile.test -t phantun-test .
+    - name: Run integration tests
+      run: docker run --privileged phantun-test

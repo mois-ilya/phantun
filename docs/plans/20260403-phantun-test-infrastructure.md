@@ -179,10 +179,10 @@ Wire fingerprint tests (raw packet capture) deferred to the fork implementation 
 **Files:**
 - Modify: `.github/workflows/rust.yml`
 
-- [ ] Add step for unit tests: `cargo test --workspace`
-- [ ] Add job for integration tests: build Dockerfile.test, run with `--privileged`
-- [ ] Verify CI config is valid YAML
-- [ ] Push and verify CI passes (or document limitations if `--privileged` not available on GitHub Actions)
+- [x] Add step for unit tests: `cargo test --workspace`
+- [x] Add job for integration tests: build Dockerfile.test, run with `--privileged`
+- [x] Verify CI config is valid YAML
+- [x] Push and verify CI passes (or document limitations if `--privileged` not available on GitHub Actions)
 
 ### Task 10: Verify acceptance criteria
 
