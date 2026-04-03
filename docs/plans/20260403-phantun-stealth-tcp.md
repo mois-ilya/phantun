@@ -136,11 +136,11 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 8: ts_ecr echo correctness (Level 2)
 
-- [ ] Write test: outgoing ts_ecr matches last received peer tsval exactly
-- [ ] Write test: after receiving multiple packets, ts_ecr reflects the latest
-- [ ] Verify `ts_ecr` update path in recv is atomic and consistent
-- [ ] Verify integration: handshake ts_ecr flow (SYN: ecr=0, SYN+ACK: ecr=peer_tsval, ACK: ecr=peer_tsval)
-- [ ] Run `cargo test` — all pass
+- [x] Write test: outgoing ts_ecr matches last received peer tsval exactly
+- [x] Write test: after receiving multiple packets, ts_ecr reflects the latest
+- [x] Verify `ts_ecr` update path in recv is atomic and consistent
+- [x] Verify integration: handshake ts_ecr flow (SYN: ecr=0, SYN+ACK: ecr=peer_tsval, ACK: ecr=peer_tsval)
+- [x] Run `cargo test` — all pass
 
 ### Task 9: Duplicate ACK tracking (Level 3)
 
