@@ -109,10 +109,10 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 5: PSH flag on data packets (Level 1)
 
-- [ ] Write test: with stealth >= 1, data packets have PSH|ACK flags (not just ACK)
-- [ ] Write test: stealth 0 still uses plain ACK
-- [ ] In `Socket::send()`: when stealth >= 1, use `tcp::TcpFlags::PSH | tcp::TcpFlags::ACK`
-- [ ] Run `cargo test` — all pass
+- [x] Write test: with stealth >= 1, data packets have PSH|ACK flags (not just ACK)
+- [x] Write test: stealth 0 still uses plain ACK
+- [x] In `Socket::send()`: when stealth >= 1, use `tcp::TcpFlags::PSH | tcp::TcpFlags::ACK`
+- [x] Run `cargo test` — all pass
 
 ### Task 6: Frequent ACK updates (Level 2)
 

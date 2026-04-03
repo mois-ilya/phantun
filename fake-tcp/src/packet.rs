@@ -994,6 +994,63 @@ mod tests {
         assert_eq!(parsed, None);
     }
 
+    // --- Task 5: PSH flag on data packets (Level 1) ---
+
+    #[test]
+    fn test_stealth_basic_data_psh_ack_flags() {
+        // With stealth >= 1, data packets should have PSH|ACK flags
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let payload = b"hello";
+        let pkt = build_tcp_packet(
+            local, remote, 1, 1,
+            tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
+            Some(payload), StealthLevel::Basic, 1000, 500,
+        );
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(
+            tcp_pkt.get_flags(),
+            tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
+            "stealth >= 1 data packets should have PSH|ACK"
+        );
+        assert_eq!(tcp_pkt.payload(), payload);
+    }
+
+    #[test]
+    fn test_stealth_off_data_no_psh_flag() {
+        // With stealth 0, data packets should have only ACK (no PSH)
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let payload = b"data";
+        let pkt = build_tcp_packet(
+            local, remote, 1, 1,
+            tcp::TcpFlags::ACK,
+            Some(payload), StealthLevel::Off, 0, 0,
+        );
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::ACK, "stealth 0 should use plain ACK");
+        assert_eq!(tcp_pkt.get_flags() & tcp::TcpFlags::PSH, 0, "stealth 0 should not have PSH");
+    }
+
+    #[test]
+    fn test_stealth_basic_psh_ack_ipv6() {
+        // PSH|ACK should also work for IPv6
+        let local: SocketAddr = "[fd00::1]:1234".parse().unwrap();
+        let remote: SocketAddr = "[fd00::2]:5678".parse().unwrap();
+        let payload = b"ipv6 data";
+        let pkt = build_tcp_packet(
+            local, remote, 100, 200,
+            tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
+            Some(payload), StealthLevel::Basic, 2000, 1000,
+        );
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[40..]).unwrap();
+        assert_eq!(
+            tcp_pkt.get_flags(),
+            tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
+            "PSH|ACK should work for IPv6 packets"
+        );
+    }
+
     #[test]
     fn test_parse_tcp_timestamp_stealth_off_syn_returns_none() {
         // Stealth Off SYN has NOP + wscale but no timestamps

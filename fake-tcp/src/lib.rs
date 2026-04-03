@@ -229,7 +229,12 @@ impl Socket {
     pub async fn send(&self, payload: &[u8]) -> Option<()> {
         match self.state {
             State::Established => {
-                let buf = self.build_tcp_packet(tcp::TcpFlags::ACK, Some(payload));
+                let flags = if self.stealth >= StealthLevel::Basic {
+                    tcp::TcpFlags::PSH | tcp::TcpFlags::ACK
+                } else {
+                    tcp::TcpFlags::ACK
+                };
+                let buf = self.build_tcp_packet(flags, Some(payload));
                 self.seq.fetch_add(payload.len() as u32, Ordering::Relaxed);
                 self.tun.send(&buf).await.ok().and(Some(()))
             }
