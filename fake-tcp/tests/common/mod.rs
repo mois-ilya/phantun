@@ -10,15 +10,12 @@ use tokio_tun::TunBuilder;
 
 // ── unique-name helpers ──────────────────────────────────────────────────────
 
-/// 8-hex-char suffix derived from sub-second nanoseconds, good enough for
-/// serialised test runs and highly unlikely to collide in parallel runs.
+/// 8-hex-char suffix guaranteed unique within this process, safe for parallel test runs.
 fn unique_suffix() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
-    format!("{:08x}", nanos)
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{:08x}", n)
 }
 
 // ── shell helpers ────────────────────────────────────────────────────────────
@@ -89,7 +86,6 @@ fn create_tun_in_netns(
         let _guard = handle.enter();
         let tuns = TunBuilder::new()
             .name(&tun_name)
-            .packet_info()
             .address(addr)
             .destination(dest)
             .up()

@@ -85,8 +85,8 @@ async fn test_seq_increments_by_payload_len() {
 
     // Send two payloads of known sizes.
     // Post-handshake: client seq = 1.
-    // After first send (17 bytes): client seq = 1 + 17 = 18.
-    // After second send (13 bytes): client seq = 18 + 13 = 31.
+    // After first send (16 bytes): client seq = 1 + 16 = 17.
+    // After second send (15 bytes): client seq = 17 + 15 = 32.
     let first = b"seq-increment-1!"; // 16 bytes
     let second = b"seq-increment-2"; // 15 bytes
 
