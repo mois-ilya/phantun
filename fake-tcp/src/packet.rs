@@ -149,6 +149,145 @@ pub fn parse_ip_packet(buf: &Bytes) -> Option<(IPPacket<'_>, tcp::TcpPacket<'_>)
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use internet_checksum::Checksum;
+    use pnet::packet::{ip, ipv4, ipv6, tcp};
+
+    fn ipv4_syn_packet() -> Bytes {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None)
+    }
+
+    fn ipv6_syn_packet() -> Bytes {
+        let local: SocketAddr = "[fd00::1]:1234".parse().unwrap();
+        let remote: SocketAddr = "[fd00::2]:5678".parse().unwrap();
+        build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None)
+    }
+
+    #[test]
+    fn test_ipv4_syn_total_length() {
+        let pkt = ipv4_syn_packet();
+        // 20 (IPv4 header) + 24 (TCP header with options: 20 base + 4 options) = 44
+        assert_eq!(pkt.len(), 44);
+    }
+
+    #[test]
+    fn test_ipv4_syn_ip_header_fields() {
+        let pkt = ipv4_syn_packet();
+        let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
+        assert_eq!(v4.get_version(), 4);
+        assert_eq!(v4.get_next_level_protocol(), ip::IpNextHeaderProtocols::Tcp);
+        assert_eq!(v4.get_ttl(), 64);
+        assert_eq!(v4.get_flags(), ipv4::Ipv4Flags::DontFragment);
+        assert_eq!(v4.get_total_length() as usize, 44);
+    }
+
+    #[test]
+    fn test_ipv4_syn_tcp_flags_doff_window() {
+        let pkt = ipv4_syn_packet();
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::SYN);
+        assert_eq!(tcp_pkt.get_data_offset(), 6, "doff=6 means 24-byte TCP header");
+        assert_eq!(tcp_pkt.get_window(), 0xFFFF);
+    }
+
+    #[test]
+    fn test_ipv4_syn_tcp_options_nop_wscale() {
+        let pkt = ipv4_syn_packet();
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        let opts = tcp_pkt.get_options_raw();
+        assert_eq!(opts.len(), 4, "SYN options: NOP(1) + wscale(3) = 4 bytes");
+        assert_eq!(opts[0], 1, "NOP kind=1");
+        assert_eq!(opts[1], 3, "wscale kind=3");
+        assert_eq!(opts[2], 3, "wscale length=3");
+        assert_eq!(opts[3], 14, "wscale shift=14");
+    }
+
+    #[test]
+    fn test_ipv4_syn_seq_ack_match_input() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let seq = 0x12345678u32;
+        let ack = 0x87654321u32;
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None);
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_sequence(), seq);
+        assert_eq!(tcp_pkt.get_acknowledgement(), ack);
+    }
+
+    #[test]
+    fn test_ipv4_syn_checksum_valid() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None);
+
+        // Verify IPv4 header checksum
+        let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
+        let stored_ip_cksm = v4.get_checksum();
+        let mut ip_hdr = pkt[..20].to_vec();
+        ip_hdr[10] = 0;
+        ip_hdr[11] = 0;
+        let mut cksm = Checksum::new();
+        cksm.add_bytes(&ip_hdr);
+        assert_eq!(stored_ip_cksm, u16::from_be_bytes(cksm.checksum()));
+
+        // Verify TCP checksum via IPv4 pseudo-header
+        let stored_tcp_cksm = tcp::TcpPacket::new(&pkt[20..]).unwrap().get_checksum();
+        let tcp_len = pkt.len() - 20;
+        let mut tcp_bytes = pkt[20..].to_vec();
+        tcp_bytes[16] = 0;
+        tcp_bytes[17] = 0;
+        let ip::IpNextHeaderProtocol(proto) = ip::IpNextHeaderProtocols::Tcp;
+        let mut cksm = Checksum::new();
+        cksm.add_bytes(&[10, 0, 0, 1]); // src IP
+        cksm.add_bytes(&[10, 0, 0, 2]); // dst IP
+        cksm.add_bytes(&[0, proto, (tcp_len >> 8) as u8, (tcp_len & 0xFF) as u8]);
+        cksm.add_bytes(&tcp_bytes);
+        assert_eq!(stored_tcp_cksm, u16::from_be_bytes(cksm.checksum()));
+    }
+
+    #[test]
+    fn test_ipv6_syn_total_length() {
+        let pkt = ipv6_syn_packet();
+        // 40 (IPv6 header) + 24 (TCP header with options) = 64
+        assert_eq!(pkt.len(), 64);
+    }
+
+    #[test]
+    fn test_ipv6_syn_ip_header_fields() {
+        let pkt = ipv6_syn_packet();
+        let v6 = ipv6::Ipv6Packet::new(&pkt).unwrap();
+        assert_eq!(v6.get_version(), 6);
+        assert_eq!(v6.get_next_header(), ip::IpNextHeaderProtocols::Tcp);
+        assert_eq!(v6.get_hop_limit(), 64);
+        assert_eq!(v6.get_payload_length() as usize, 24, "payload_length = TCP header with options");
+    }
+
+    #[test]
+    fn test_ipv6_syn_tcp_flags_doff_window_options() {
+        let local: SocketAddr = "[fd00::1]:9000".parse().unwrap();
+        let remote: SocketAddr = "[fd00::2]:9001".parse().unwrap();
+        let seq = 0xABCDu32;
+        let ack = 0x1234u32;
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None);
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[40..]).unwrap();
+        assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::SYN);
+        assert_eq!(tcp_pkt.get_data_offset(), 6);
+        assert_eq!(tcp_pkt.get_window(), 0xFFFF);
+        assert_eq!(tcp_pkt.get_sequence(), seq);
+        assert_eq!(tcp_pkt.get_acknowledgement(), ack);
+        let opts = tcp_pkt.get_options_raw();
+        assert_eq!(opts.len(), 4);
+        assert_eq!(opts[0], 1);  // NOP
+        assert_eq!(opts[1], 3);  // wscale kind
+        assert_eq!(opts[2], 3);  // wscale length
+        assert_eq!(opts[3], 14); // wscale shift
+    }
+}
+
 #[cfg(all(test, feature = "benchmark"))]
 mod benchmarks {
     extern crate test;

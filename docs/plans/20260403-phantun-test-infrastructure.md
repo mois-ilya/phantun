@@ -80,15 +80,15 @@ Wire fingerprint tests (raw packet capture) deferred to the fork implementation 
 **Files:**
 - Modify: `fake-tcp/src/packet.rs` (add `#[cfg(test)] mod tests` at bottom)
 
-- [ ] Add test module boilerplate with `use super::*` and necessary imports
-- [ ] Test IPv4 SYN: total length = 20 (IP) + 24 (TCP with options) = 44 bytes
-- [ ] Test IPv4 SYN: IP header fields (version=4, protocol=TCP, TTL=64, DF flag)
-- [ ] Test IPv4 SYN: TCP flags = SYN, doff=6, window=0xFFFF
-- [ ] Test IPv4 SYN: TCP options = NOP + wscale(14), exactly 4 bytes
-- [ ] Test IPv4 SYN: seq and ack match input parameters
-- [ ] Test IPv4 SYN: checksum is valid (recompute and compare)
-- [ ] Test IPv6 SYN: same TCP-level checks, IPv6 header (version=6, hop_limit=64)
-- [ ] Run `cargo test -p fake-tcp` — all pass
+- [x] Add test module boilerplate with `use super::*` and necessary imports
+- [x] Test IPv4 SYN: total length = 20 (IP) + 24 (TCP with options) = 44 bytes
+- [x] Test IPv4 SYN: IP header fields (version=4, protocol=TCP, TTL=64, DF flag)
+- [x] Test IPv4 SYN: TCP flags = SYN, doff=6, window=0xFFFF
+- [x] Test IPv4 SYN: TCP options = NOP + wscale(14), exactly 4 bytes
+- [x] Test IPv4 SYN: seq and ack match input parameters
+- [x] Test IPv4 SYN: checksum is valid (recompute and compare)
+- [x] Test IPv6 SYN: same TCP-level checks, IPv6 header (version=6, hop_limit=64)
+- [x] Run `cargo test -p fake-tcp` — all pass
 
 ### Task 3: Unit tests for `build_tcp_packet()` — data and control packets
 
