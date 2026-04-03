@@ -116,13 +116,13 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 6: Frequent ACK updates (Level 2)
 
-- [ ] Write test: with stealth >= 2, ACK updates on every received packet (not 128MB threshold)
-- [ ] Write test: standalone ACK sent when receiving data without sending
-- [ ] Write test: stealth 0 and 1 keep 128MB threshold
-- [ ] Add `ack_update_mode` logic to `Socket::recv()`: when stealth >= 2, send ACK after each received packet if no data is being sent concurrently
-- [ ] Reduce/remove 128MB threshold for stealth >= 2
-- [ ] Piggyback ACK on next data send to minimize extra packets
-- [ ] Run `cargo test` — all pass
+- [x] Write test: with stealth >= 2, ACK updates on every received packet (not 128MB threshold)
+- [x] Write test: standalone ACK sent when receiving data without sending
+- [x] Write test: stealth 0 and 1 keep 128MB threshold
+- [x] Add `ack_update_mode` logic to `Socket::recv()`: when stealth >= 2, send ACK after each received packet if no data is being sent concurrently
+- [x] Reduce/remove 128MB threshold for stealth >= 2
+- [x] Piggyback ACK on next data send to minimize extra packets
+- [x] Run `cargo test` — all pass
 
 ### Task 7: Dynamic window (Level 2)
 

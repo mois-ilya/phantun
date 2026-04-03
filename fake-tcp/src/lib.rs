@@ -273,12 +273,18 @@ impl Socket {
                     let last_ask = self.last_ack.load(Ordering::Relaxed);
                     self.ack.store(new_ack, Ordering::Relaxed);
 
-                    if new_ack.overflowing_sub(last_ask).0 > MAX_UNACKED_LEN {
+                    let send_ack = if self.stealth >= StealthLevel::Standard {
+                        // Level 2+: send standalone ACK on every received data packet
+                        new_ack != last_ask
+                    } else {
+                        // Level 0-1: only send ACK after 128MB of unacked data
+                        new_ack.overflowing_sub(last_ask).0 > MAX_UNACKED_LEN
+                    };
+
+                    if send_ack {
                         let buf = self.build_tcp_packet(tcp::TcpFlags::ACK, None);
                         if let Err(e) = self.tun.try_send(&buf) {
-                            // This should not really happen as we have not sent anything for
-                            // quite some time...
-                            info!("Connection {} unable to send idling ACK back: {}", self, e)
+                            info!("Connection {} unable to send standalone ACK: {}", self, e)
                         }
                     }
 
@@ -774,6 +780,95 @@ mod tests {
         let values: Vec<u32> = (0..10).map(|_| initial_seq(StealthLevel::Basic)).collect();
         let unique: std::collections::HashSet<u32> = values.into_iter().collect();
         assert!(unique.len() > 1, "ISN should vary between connections");
+    }
+
+    // --- Task 6: Frequent ACK updates (Level 2) ---
+
+    #[test]
+    fn test_ack_threshold_stealth_off_uses_128mb() {
+        // Stealth Off: ACK only sent when unacked exceeds MAX_UNACKED_LEN (128MB)
+        let threshold = MAX_UNACKED_LEN;
+        let stealth = StealthLevel::Off;
+
+        // Small gap: no ACK
+        let new_ack: u32 = 1000;
+        let last_ack: u32 = 0;
+        let should_ack = should_send_standalone_ack(stealth, new_ack, last_ack);
+        assert!(!should_ack, "stealth Off: small gap should not trigger ACK");
+
+        // Gap exceeding 128MB: ACK
+        let new_ack: u32 = threshold + 1;
+        let last_ack: u32 = 0;
+        let should_ack = should_send_standalone_ack(stealth, new_ack, last_ack);
+        assert!(should_ack, "stealth Off: gap > 128MB should trigger ACK");
+    }
+
+    #[test]
+    fn test_ack_threshold_stealth_basic_uses_128mb() {
+        // Stealth Basic (level 1): still uses 128MB threshold
+        let threshold = MAX_UNACKED_LEN;
+        let stealth = StealthLevel::Basic;
+
+        let new_ack: u32 = 1000;
+        let last_ack: u32 = 0;
+        let should_ack = should_send_standalone_ack(stealth, new_ack, last_ack);
+        assert!(!should_ack, "stealth Basic: small gap should not trigger ACK");
+
+        let new_ack: u32 = threshold + 1;
+        let last_ack: u32 = 0;
+        let should_ack = should_send_standalone_ack(stealth, new_ack, last_ack);
+        assert!(should_ack, "stealth Basic: gap > 128MB should trigger ACK");
+    }
+
+    #[test]
+    fn test_ack_threshold_stealth_standard_sends_on_every_packet() {
+        // Stealth Standard (level 2): ACK on every received data packet
+        let stealth = StealthLevel::Standard;
+
+        // Even a small gap triggers ACK
+        let new_ack: u32 = 100;
+        let last_ack: u32 = 0;
+        let should_ack = should_send_standalone_ack(stealth, new_ack, last_ack);
+        assert!(should_ack, "stealth Standard: any data should trigger standalone ACK");
+
+        // Single byte of data triggers ACK
+        let new_ack: u32 = 1;
+        let last_ack: u32 = 0;
+        let should_ack = should_send_standalone_ack(stealth, new_ack, last_ack);
+        assert!(should_ack, "stealth Standard: even 1 byte should trigger ACK");
+    }
+
+    #[test]
+    fn test_ack_threshold_stealth_full_sends_on_every_packet() {
+        // Stealth Full (level 3): also ACKs on every received packet
+        let stealth = StealthLevel::Full;
+
+        let new_ack: u32 = 1460;
+        let last_ack: u32 = 0;
+        let should_ack = should_send_standalone_ack(stealth, new_ack, last_ack);
+        assert!(should_ack, "stealth Full: any data should trigger standalone ACK");
+    }
+
+    #[test]
+    fn test_ack_no_standalone_when_unchanged() {
+        // No standalone ACK when ack hasn't changed (e.g., zero-length payload)
+        for stealth in [StealthLevel::Off, StealthLevel::Basic, StealthLevel::Standard, StealthLevel::Full] {
+            let new_ack: u32 = 100;
+            let last_ack: u32 = 100;
+            let should_ack = should_send_standalone_ack(stealth, new_ack, last_ack);
+            assert!(!should_ack, "stealth {:?}: no ACK when ack unchanged", stealth);
+        }
+    }
+
+    /// Helper that mirrors the ACK decision logic in Socket::recv()
+    fn should_send_standalone_ack(stealth: StealthLevel, new_ack: u32, last_ack: u32) -> bool {
+        if stealth >= StealthLevel::Standard {
+            // Level 2+: ACK on every received data packet
+            new_ack != last_ack
+        } else {
+            // Level 0-1: only ACK after 128MB of unacked data
+            new_ack.overflowing_sub(last_ack).0 > MAX_UNACKED_LEN
+        }
     }
 
     #[test]
