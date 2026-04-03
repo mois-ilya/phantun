@@ -1,9 +1,11 @@
 use bytes::{Bytes, BytesMut};
 use internet_checksum::Checksum;
-use pnet::packet::Packet;
+use pnet::packet::{MutablePacket, Packet};
 use pnet::packet::{ip, ipv4, ipv6, tcp};
 use std::convert::TryInto;
 use std::net::{IpAddr, SocketAddr};
+
+use crate::StealthLevel;
 
 const IPV4_HEADER_LEN: usize = 20;
 const IPV6_HEADER_LEN: usize = 40;
@@ -38,13 +40,23 @@ pub fn build_tcp_packet(
     ack: u32,
     flags: u8,
     payload: Option<&[u8]>,
+    stealth: StealthLevel,
 ) -> Bytes {
     let ip_header_len = match local_addr {
         SocketAddr::V4(_) => IPV4_HEADER_LEN,
         SocketAddr::V6(_) => IPV6_HEADER_LEN,
     };
-    let wscale = (flags & tcp::TcpFlags::SYN) != 0;
-    let tcp_header_len = TCP_HEADER_LEN + if wscale { 4 } else { 0 }; // nop + wscale
+    let is_syn = (flags & tcp::TcpFlags::SYN) != 0;
+    let tcp_options_len = if is_syn {
+        if stealth >= StealthLevel::Basic {
+            20 // MSS(4) + SACK_PERM(2) + TS(10) + NOP(1) + wscale(3)
+        } else {
+            4 // NOP(1) + wscale(3)
+        }
+    } else {
+        0
+    };
+    let tcp_header_len = TCP_HEADER_LEN + tcp_options_len;
     let tcp_total_len = tcp_header_len + payload.map_or(0, |payload| payload.len());
     let total_len = ip_header_len + tcp_total_len;
     let mut buf = BytesMut::zeroed(total_len);
@@ -87,10 +99,34 @@ pub fn build_tcp_packet(
     tcp.set_sequence(seq);
     tcp.set_acknowledgement(ack);
     tcp.set_flags(flags);
-    tcp.set_data_offset(TCP_HEADER_LEN as u8 / 4 + if wscale { 1 } else { 0 });
-    if wscale {
-        let wscale = tcp::TcpOption::wscale(14);
-        tcp.set_options(&[tcp::TcpOption::nop(), wscale]);
+    tcp.set_data_offset((tcp_header_len / 4) as u8);
+    if is_syn {
+        if stealth >= StealthLevel::Basic {
+            // Linux 5.x SYN fingerprint: MSS + SACK_PERM + Timestamps + NOP + wscale
+            let pkt = tcp.packet_mut();
+            let opts = &mut pkt[TCP_HEADER_LEN..tcp_header_len];
+            // MSS: kind=2, len=4, value=1460 (0x05B4)
+            opts[0] = 2;
+            opts[1] = 4;
+            opts[2] = 0x05;
+            opts[3] = 0xB4;
+            // SACK permitted: kind=4, len=2
+            opts[4] = 4;
+            opts[5] = 2;
+            // Timestamps: kind=8, len=10, tsval=0, tsecr=0 (real values added in Task 4)
+            opts[6] = 8;
+            opts[7] = 10;
+            // bytes 8-15: tsval(4) + tsecr(4) = 0 (already zeroed)
+            // NOP: kind=1
+            opts[16] = 1;
+            // Window scale: kind=3, len=3, shift=7
+            opts[17] = 3;
+            opts[18] = 3;
+            opts[19] = 7;
+        } else {
+            let wscale = tcp::TcpOption::wscale(14);
+            tcp.set_options(&[tcp::TcpOption::nop(), wscale]);
+        }
     }
 
     if let Some(payload) = payload {
@@ -162,13 +198,13 @@ mod tests {
     fn ipv4_syn_packet() -> Bytes {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None)
+        build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Off)
     }
 
     fn ipv6_syn_packet() -> Bytes {
         let local: SocketAddr = "[fd00::1]:1234".parse().unwrap();
         let remote: SocketAddr = "[fd00::2]:5678".parse().unwrap();
-        build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None)
+        build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Off)
     }
 
     #[test]
@@ -216,7 +252,7 @@ mod tests {
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let seq = 0x12345678u32;
         let ack = 0x87654321u32;
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None);
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None, StealthLevel::Off);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         assert_eq!(tcp_pkt.get_sequence(), seq);
         assert_eq!(tcp_pkt.get_acknowledgement(), ack);
@@ -226,7 +262,7 @@ mod tests {
     fn test_ipv4_syn_checksum_valid() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None);
+        let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Off);
 
         // Verify IPv4 header checksum
         let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
@@ -276,7 +312,7 @@ mod tests {
         let remote: SocketAddr = "[fd00::2]:9001".parse().unwrap();
         let seq = 0xABCDu32;
         let ack = 0x1234u32;
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None);
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None, StealthLevel::Off);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[40..]).unwrap();
         assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::SYN);
         assert_eq!(tcp_pkt.get_data_offset(), 6);
@@ -298,7 +334,7 @@ mod tests {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let payload = b"hello world";
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload));
+        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off);
         // 20 (IPv4) + 20 (TCP, no options) + 11 (payload) = 51
         assert_eq!(pkt.len(), 20 + 20 + payload.len());
     }
@@ -308,7 +344,7 @@ mod tests {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let payload = b"data";
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload));
+        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         assert_eq!(tcp_pkt.get_data_offset(), 5, "doff=5 means 20-byte TCP header (no options)");
         assert_eq!(tcp_pkt.get_options_raw().len(), 0, "no TCP options for data packets");
@@ -320,7 +356,7 @@ mod tests {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let payload = b"test payload bytes";
-        let pkt = build_tcp_packet(local, remote, 42, 99, tcp::TcpFlags::ACK, Some(payload));
+        let pkt = build_tcp_packet(local, remote, 42, 99, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         assert_eq!(tcp_pkt.payload(), payload);
     }
@@ -330,7 +366,7 @@ mod tests {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let payload = b"data";
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload));
+        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::ACK, "only ACK flag set, no PSH");
         assert_eq!(tcp_pkt.get_flags() & tcp::TcpFlags::PSH, 0, "PSH flag not set");
@@ -349,6 +385,7 @@ mod tests {
             ack,
             tcp::TcpFlags::RST | tcp::TcpFlags::ACK,
             None,
+            StealthLevel::Off,
         );
         // 20 (IPv4) + 20 (TCP) = 40, no payload
         assert_eq!(pkt.len(), 40);
@@ -370,6 +407,7 @@ mod tests {
             1,
             tcp::TcpFlags::SYN | tcp::TcpFlags::ACK,
             None,
+            StealthLevel::Off,
         );
         // SYN|ACK: wscale is set because SYN flag is present → 44 bytes
         assert_eq!(pkt.len(), 44);
@@ -388,7 +426,7 @@ mod tests {
     fn test_ack_only_no_data_length() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, None);
+        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, None, StealthLevel::Off);
         // 20 (IPv4) + 20 (TCP, no options, no payload) = 40
         assert_eq!(pkt.len(), 40);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
@@ -403,7 +441,7 @@ mod tests {
         let payload = b"ipv6 payload";
         let seq = 100u32;
         let ack = 200u32;
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload));
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off);
         // 40 (IPv6) + 20 (TCP) + payload
         assert_eq!(pkt.len(), 40 + 20 + payload.len());
         let v6 = ipv6::Ipv6Packet::new(&pkt).unwrap();
@@ -426,7 +464,7 @@ mod tests {
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let seq = 0x12345678u32;
         let ack = 0u32;
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None);
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None, StealthLevel::Off);
         let (ip_pkt, tcp_pkt) = parse_ip_packet(&pkt).unwrap();
         assert_eq!(ip_pkt.get_source(), IpAddr::V4("10.0.0.1".parse().unwrap()));
         assert_eq!(ip_pkt.get_destination(), IpAddr::V4("10.0.0.2".parse().unwrap()));
@@ -449,7 +487,7 @@ mod tests {
         let seq = 100u32;
         let ack = 200u32;
         let payload = b"roundtrip data";
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload));
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off);
         let (ip_pkt, tcp_pkt) = parse_ip_packet(&pkt).unwrap();
         assert_eq!(ip_pkt.get_source(), IpAddr::V4("10.0.0.1".parse().unwrap()));
         assert_eq!(ip_pkt.get_destination(), IpAddr::V4("10.0.0.2".parse().unwrap()));
@@ -465,7 +503,7 @@ mod tests {
         let remote: SocketAddr = "[fd00::2]:9001".parse().unwrap();
         let seq = 0xABCDu32;
         let ack = 0u32;
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None);
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None, StealthLevel::Off);
         let (ip_pkt, tcp_pkt) = parse_ip_packet(&pkt).unwrap();
         assert_eq!(ip_pkt.get_source(), IpAddr::V6("fd00::1".parse().unwrap()));
         assert_eq!(ip_pkt.get_destination(), IpAddr::V6("fd00::2".parse().unwrap()));
@@ -483,7 +521,7 @@ mod tests {
         let seq = 50u32;
         let ack = 60u32;
         let payload = b"ipv6 roundtrip";
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload));
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off);
         let (ip_pkt, tcp_pkt) = parse_ip_packet(&pkt).unwrap();
         assert_eq!(ip_pkt.get_source(), IpAddr::V6("fd00::1".parse().unwrap()));
         assert_eq!(ip_pkt.get_destination(), IpAddr::V6("fd00::2".parse().unwrap()));
@@ -532,6 +570,199 @@ mod tests {
         let bytes = Bytes::copy_from_slice(&buf);
         parse_ip_packet(&bytes);
     }
+
+    // --- Task 3 (stealth plan): Realistic SYN fingerprint tests ---
+
+    fn ipv4_stealth_syn_packet() -> Bytes {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        build_tcp_packet(local, remote, 0x12345678, 0, tcp::TcpFlags::SYN, None, StealthLevel::Basic)
+    }
+
+    #[test]
+    fn test_stealth_syn_total_length_ipv4() {
+        let pkt = ipv4_stealth_syn_packet();
+        // 20 (IPv4) + 40 (TCP: 20 base + 20 options) = 60
+        assert_eq!(pkt.len(), 60);
+    }
+
+    #[test]
+    fn test_stealth_syn_doff_10() {
+        let pkt = ipv4_stealth_syn_packet();
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_data_offset(), 10, "doff=10 means 40-byte TCP header");
+    }
+
+    #[test]
+    fn test_stealth_syn_options_mss_1460() {
+        let pkt = ipv4_stealth_syn_packet();
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        let opts = tcp_pkt.get_options_raw();
+        assert_eq!(opts.len(), 20);
+        // MSS: kind=2, len=4, value=1460 (0x05B4)
+        assert_eq!(opts[0], 2, "MSS kind");
+        assert_eq!(opts[1], 4, "MSS len");
+        assert_eq!(u16::from_be_bytes([opts[2], opts[3]]), 1460, "MSS value");
+    }
+
+    #[test]
+    fn test_stealth_syn_options_sack_perm() {
+        let pkt = ipv4_stealth_syn_packet();
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        let opts = tcp_pkt.get_options_raw();
+        // SACK permitted: kind=4, len=2
+        assert_eq!(opts[4], 4, "SACK_PERM kind");
+        assert_eq!(opts[5], 2, "SACK_PERM len");
+    }
+
+    #[test]
+    fn test_stealth_syn_options_timestamps() {
+        let pkt = ipv4_stealth_syn_packet();
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        let opts = tcp_pkt.get_options_raw();
+        // Timestamps: kind=8, len=10
+        assert_eq!(opts[6], 8, "Timestamps kind");
+        assert_eq!(opts[7], 10, "Timestamps len");
+        // tsecr should be 0 for SYN
+        let ts_ecr = u32::from_be_bytes([opts[12], opts[13], opts[14], opts[15]]);
+        assert_eq!(ts_ecr, 0, "ts_ecr=0 on initial SYN");
+    }
+
+    #[test]
+    fn test_stealth_syn_options_wscale_7() {
+        let pkt = ipv4_stealth_syn_packet();
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        let opts = tcp_pkt.get_options_raw();
+        // NOP at offset 16
+        assert_eq!(opts[16], 1, "NOP before wscale");
+        // wscale: kind=3, len=3, shift=7
+        assert_eq!(opts[17], 3, "wscale kind");
+        assert_eq!(opts[18], 3, "wscale len");
+        assert_eq!(opts[19], 7, "wscale shift=7");
+    }
+
+    #[test]
+    fn test_stealth_syn_options_full_linux_layout() {
+        // Verify the complete byte layout matches Linux 5.x SYN fingerprint
+        let pkt = ipv4_stealth_syn_packet();
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        let opts = tcp_pkt.get_options_raw();
+        assert_eq!(opts.len(), 20);
+        // MSS(4) + SACK_PERM(2) + TS(10) + NOP(1) + wscale(3) = 20
+        let expected_prefix = [
+            2, 4, 0x05, 0xB4, // MSS = 1460
+            4, 2,             // SACK permitted
+            8, 10,            // Timestamps kind + len
+        ];
+        assert_eq!(&opts[0..8], &expected_prefix);
+        let expected_suffix = [
+            1,          // NOP
+            3, 3, 7,    // wscale = 7
+        ];
+        assert_eq!(&opts[16..20], &expected_suffix);
+    }
+
+    #[test]
+    fn test_stealth_syn_ack_has_same_options() {
+        // SYN+ACK with stealth should have the same Linux-like options
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let pkt = build_tcp_packet(
+            local, remote, 100, 1,
+            tcp::TcpFlags::SYN | tcp::TcpFlags::ACK, None,
+            StealthLevel::Basic,
+        );
+        assert_eq!(pkt.len(), 60, "SYN+ACK stealth: 20 IPv4 + 40 TCP");
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_data_offset(), 10);
+        let opts = tcp_pkt.get_options_raw();
+        assert_eq!(opts.len(), 20);
+        // MSS
+        assert_eq!(opts[0], 2);
+        assert_eq!(u16::from_be_bytes([opts[2], opts[3]]), 1460);
+        // SACK_PERM
+        assert_eq!(opts[4], 4);
+        // Timestamps
+        assert_eq!(opts[6], 8);
+        // wscale
+        assert_eq!(opts[17], 3);
+        assert_eq!(opts[19], 7);
+    }
+
+    #[test]
+    fn test_stealth_off_syn_still_old_format() {
+        // Stealth Off must produce the original format: NOP + wscale(14), doff=6
+        let pkt = ipv4_syn_packet(); // uses StealthLevel::Off
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_data_offset(), 6);
+        let opts = tcp_pkt.get_options_raw();
+        assert_eq!(opts.len(), 4);
+        assert_eq!(opts[0], 1);  // NOP
+        assert_eq!(opts[1], 3);  // wscale kind
+        assert_eq!(opts[3], 14); // wscale shift=14
+    }
+
+    #[test]
+    fn test_stealth_syn_ipv6_total_length() {
+        let local: SocketAddr = "[fd00::1]:1234".parse().unwrap();
+        let remote: SocketAddr = "[fd00::2]:5678".parse().unwrap();
+        let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Basic);
+        // 40 (IPv6) + 40 (TCP: 20 base + 20 options) = 80
+        assert_eq!(pkt.len(), 80);
+        let v6 = ipv6::Ipv6Packet::new(&pkt).unwrap();
+        assert_eq!(v6.get_payload_length() as usize, 40);
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[40..]).unwrap();
+        assert_eq!(tcp_pkt.get_data_offset(), 10);
+    }
+
+    #[test]
+    fn test_stealth_syn_checksum_valid() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let pkt = build_tcp_packet(local, remote, 0x1234, 0, tcp::TcpFlags::SYN, None, StealthLevel::Basic);
+
+        // Verify IPv4 header checksum
+        let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
+        let stored_ip_cksm = v4.get_checksum();
+        let mut ip_hdr = pkt[..20].to_vec();
+        ip_hdr[10] = 0;
+        ip_hdr[11] = 0;
+        let mut cksm = Checksum::new();
+        cksm.add_bytes(&ip_hdr);
+        assert_eq!(stored_ip_cksm, u16::from_be_bytes(cksm.checksum()));
+
+        // Verify TCP checksum
+        let tcp_len = pkt.len() - 20;
+        let mut tcp_bytes = pkt[20..].to_vec();
+        tcp_bytes[16] = 0;
+        tcp_bytes[17] = 0;
+        let ip::IpNextHeaderProtocol(proto) = ip::IpNextHeaderProtocols::Tcp;
+        let mut cksm = Checksum::new();
+        cksm.add_bytes(&[10, 0, 0, 1]);
+        cksm.add_bytes(&[10, 0, 0, 2]);
+        cksm.add_bytes(&[0, proto, (tcp_len >> 8) as u8, (tcp_len & 0xFF) as u8]);
+        cksm.add_bytes(&tcp_bytes);
+        assert_eq!(
+            tcp::TcpPacket::new(&pkt[20..]).unwrap().get_checksum(),
+            u16::from_be_bytes(cksm.checksum())
+        );
+    }
+
+    #[test]
+    fn test_stealth_standard_and_full_also_get_linux_syn() {
+        // Higher stealth levels should also produce Linux-like SYN
+        for stealth in [StealthLevel::Standard, StealthLevel::Full] {
+            let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+            let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+            let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, stealth);
+            assert_eq!(pkt.len(), 60, "stealth {:?} SYN should be 60 bytes", stealth);
+            let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+            assert_eq!(tcp_pkt.get_data_offset(), 10);
+            let opts = tcp_pkt.get_options_raw();
+            assert_eq!(opts[0], 2); // MSS
+            assert_eq!(opts[19], 7); // wscale=7
+        }
+    }
 }
 
 #[cfg(all(test, feature = "benchmark"))]
@@ -553,6 +784,7 @@ mod benchmarks {
                 456,
                 tcp::TcpFlags::ACK,
                 Some(&payload),
+                StealthLevel::Off,
             )
         });
     }
@@ -570,6 +802,7 @@ mod benchmarks {
                 456,
                 tcp::TcpFlags::ACK,
                 Some(&payload),
+                StealthLevel::Off,
             )
         });
     }
@@ -587,6 +820,7 @@ mod benchmarks {
                 456,
                 tcp::TcpFlags::ACK,
                 Some(&payload),
+                StealthLevel::Off,
             )
         });
     }

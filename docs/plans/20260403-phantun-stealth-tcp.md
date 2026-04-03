@@ -87,14 +87,14 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 3: Realistic SYN fingerprint (Level 1)
 
-- [ ] Write tests: with stealth >= 1, SYN packet has MSS=1460, SACK_PERM, Timestamps, wscale=7, doff=10 (40 bytes header)
-- [ ] Write tests: SYN+ACK has same options
-- [ ] Write test: stealth 0 still produces old SYN format (NOP + wscale=14, doff=6)
-- [ ] Extend `build_tcp_packet()` signature: add `stealth: StealthLevel` parameter
-- [ ] When stealth >= 1 and SYN flag set, build options: MSS(1460) + SACK_PERM + Timestamps(tsval, 0) + NOP + wscale(7)
-- [ ] Options layout (20 bytes): MSS(4) + SACK_PERM(2) + Timestamps(10) + NOP(1) + NOP(1) + wscale(3) + NOP(1) = 22 → pad to 24 (doff=11, 44-byte header)
-- [ ] Verify options byte layout matches Linux kernel TCP SYN fingerprint
-- [ ] Run `cargo test` — all pass
+- [x] Write tests: with stealth >= 1, SYN packet has MSS=1460, SACK_PERM, Timestamps, wscale=7, doff=10 (40 bytes header)
+- [x] Write tests: SYN+ACK has same options
+- [x] Write test: stealth 0 still produces old SYN format (NOP + wscale=14, doff=6)
+- [x] Extend `build_tcp_packet()` signature: add `stealth: StealthLevel` parameter
+- [x] When stealth >= 1 and SYN flag set, build options: MSS(1460) + SACK_PERM + Timestamps(tsval, 0) + NOP + wscale(7)
+- [x] Options layout (20 bytes): MSS(4) + SACK_PERM(2) + Timestamps(10) + NOP(1) + wscale(3) = 20 (doff=10, 40-byte header)
+- [x] Verify options byte layout matches Linux kernel TCP SYN fingerprint
+- [x] Run `cargo test` — all pass
 
 ### Task 4: Timestamps state in Socket (Level 1)
 

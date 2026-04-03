@@ -190,6 +190,7 @@ impl Socket {
             ack,
             flags,
             payload,
+            self.stealth,
         )
     }
 
@@ -366,6 +367,7 @@ impl Drop for Socket {
             0,
             tcp::TcpFlags::RST,
             None,
+            self.stealth,
         );
         if let Err(e) = self.tun.try_send(&buf) {
             warn!("Unable to send RST to remote end: {}", e);
@@ -567,6 +569,7 @@ impl Stack {
                                         tcp_packet.get_sequence() + tcp_packet.payload().len() as u32 + 1, // +1 because of SYN flag set
                                         tcp::TcpFlags::RST | tcp::TcpFlags::ACK,
                                         None,
+                                        StealthLevel::Off,
                                     );
                                     shared.tun[0].try_send(&buf).unwrap();
                                 }
@@ -579,6 +582,7 @@ impl Stack {
                                     tcp_packet.get_sequence() + tcp_packet.payload().len() as u32,
                                     tcp::TcpFlags::RST | tcp::TcpFlags::ACK,
                                     None,
+                                    StealthLevel::Off,
                                 );
                                 shared.tun[0].try_send(&buf).unwrap();
                             }
