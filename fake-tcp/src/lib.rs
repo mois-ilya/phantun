@@ -146,6 +146,10 @@ pub struct Socket {
     ts_ecr: AtomicU32,
     /// Base window value for dynamic window randomization (stealth >= Standard)
     window_base: u16,
+    /// Count of consecutive identical ACK values from peer (stealth >= Full)
+    dup_ack_count: AtomicU32,
+    /// Last sequence number acknowledged by peer (stealth >= Full)
+    last_acked_seq: AtomicU32,
 }
 
 /// A socket that represents a unique TCP connection between a server and client.
@@ -197,6 +201,8 @@ impl Socket {
                 } else {
                     0xFFFF
                 },
+                dup_ack_count: AtomicU32::new(0),
+                last_acked_seq: AtomicU32::new(0),
             },
             incoming_tx,
         )
@@ -287,6 +293,23 @@ impl Socket {
                         && let Some(peer_tsval) = parse_tcp_timestamp(&tcp_packet)
                     {
                         self.ts_ecr.store(peer_tsval, Ordering::Relaxed);
+                    }
+
+                    // Track duplicate ACKs for fast retransmit (stealth >= Full)
+                    if self.stealth >= StealthLevel::Full {
+                        let peer_ack = tcp_packet.get_acknowledgement();
+                        let prev_acked = self.last_acked_seq.load(Ordering::Relaxed);
+                        if peer_ack == prev_acked {
+                            let count = self.dup_ack_count.fetch_add(1, Ordering::Relaxed) + 1;
+                            if count >= 3 {
+                                // Triple duplicate ACK: reset seq to last acked position
+                                // (simulate fast retransmit)
+                                self.seq.store(prev_acked, Ordering::Relaxed);
+                            }
+                        } else {
+                            self.last_acked_seq.store(peer_ack, Ordering::Relaxed);
+                            self.dup_ack_count.store(1, Ordering::Relaxed);
+                        }
                     }
 
                     let payload = tcp_packet.payload();
@@ -999,5 +1022,136 @@ mod tests {
         assert!(base >= 256 && base <= 512);
         let window = compute_current_window(StealthLevel::Full, base);
         assert_ne!(window, 0xFFFF, "stealth Full should not use static 0xFFFF");
+    }
+
+    // --- Task 9: Duplicate ACK tracking (Level 3) ---
+
+    /// Simulates the duplicate ACK tracking logic from Socket::recv().
+    /// Returns (new_dup_ack_count, new_last_acked_seq, seq_was_reset).
+    fn simulate_dup_ack_tracking(
+        stealth: StealthLevel,
+        peer_ack: u32,
+        prev_acked_seq: u32,
+        prev_dup_count: u32,
+        current_seq: u32,
+    ) -> (u32, u32, u32) {
+        if stealth >= StealthLevel::Full {
+            if peer_ack == prev_acked_seq {
+                let new_count = prev_dup_count + 1;
+                let new_seq = if new_count >= 3 {
+                    prev_acked_seq // fast retransmit: reset seq
+                } else {
+                    current_seq // no reset yet
+                };
+                (new_count, prev_acked_seq, new_seq)
+            } else {
+                (1, peer_ack, current_seq)
+            }
+        } else {
+            // Below Full: no dup ACK tracking
+            (prev_dup_count, prev_acked_seq, current_seq)
+        }
+    }
+
+    #[test]
+    fn test_dup_ack_triple_triggers_fast_retransmit() {
+        // When the same ACK is received 3 times, seq resets to acked position
+        let stealth = StealthLevel::Full;
+        let acked_seq = 5000u32;
+        let current_seq = 6460u32; // seq has advanced beyond acked
+
+        // First ACK with value 5000: new peer_ack, count becomes 1
+        let (count, last_acked, seq) =
+            simulate_dup_ack_tracking(stealth, acked_seq, 0, 0, current_seq);
+        assert_eq!(count, 1);
+        assert_eq!(last_acked, acked_seq);
+        assert_eq!(seq, current_seq, "no reset on first ACK");
+
+        // Second duplicate ACK: count becomes 2
+        let (count, last_acked, seq) =
+            simulate_dup_ack_tracking(stealth, acked_seq, acked_seq, 1, current_seq);
+        assert_eq!(count, 2);
+        assert_eq!(last_acked, acked_seq);
+        assert_eq!(seq, current_seq, "no reset on second dup ACK");
+
+        // Third duplicate ACK: count becomes 3, triggers fast retransmit
+        let (count, last_acked, seq) =
+            simulate_dup_ack_tracking(stealth, acked_seq, acked_seq, 2, current_seq);
+        assert_eq!(count, 3);
+        assert_eq!(last_acked, acked_seq);
+        assert_eq!(seq, acked_seq, "seq should reset to acked position on triple dup ACK");
+    }
+
+    #[test]
+    fn test_dup_ack_seq_resets_to_acked_position() {
+        // Verify that after triple dup ACK, seq equals the acknowledged seq
+        let stealth = StealthLevel::Full;
+        let acked_seq = 12345u32;
+        let current_seq = 99999u32;
+
+        // Simulate receiving 3 duplicate ACKs
+        let (count, _, seq) =
+            simulate_dup_ack_tracking(stealth, acked_seq, acked_seq, 2, current_seq);
+        assert_eq!(count, 3);
+        assert_eq!(seq, acked_seq, "seq must equal last_acked_seq after fast retransmit");
+    }
+
+    #[test]
+    fn test_dup_ack_count_resets_on_new_ack() {
+        // When a new (different) ACK value arrives, dup count resets to 1
+        let stealth = StealthLevel::Full;
+
+        // Had 2 dup ACKs for seq 1000, now get ACK for seq 2000
+        let (count, last_acked, seq) =
+            simulate_dup_ack_tracking(stealth, 2000, 1000, 2, 5000);
+        assert_eq!(count, 1, "dup count should reset to 1 on new ACK value");
+        assert_eq!(last_acked, 2000, "last_acked should update to new value");
+        assert_eq!(seq, 5000, "seq should not change on new ACK");
+    }
+
+    #[test]
+    fn test_dup_ack_more_than_three_continues_resetting() {
+        // After 3+ dup ACKs, additional dups should keep resetting seq
+        let stealth = StealthLevel::Full;
+        let acked = 7000u32;
+
+        // 4th dup ACK (count was already 3)
+        let (count, _, seq) =
+            simulate_dup_ack_tracking(stealth, acked, acked, 3, 9000);
+        assert_eq!(count, 4);
+        assert_eq!(seq, acked, "seq should still be reset on 4th dup ACK");
+
+        // 5th dup ACK
+        let (count, _, seq) =
+            simulate_dup_ack_tracking(stealth, acked, acked, 4, 9000);
+        assert_eq!(count, 5);
+        assert_eq!(seq, acked, "seq should still be reset on 5th dup ACK");
+    }
+
+    #[test]
+    fn test_dup_ack_not_tracked_below_full() {
+        // Stealth levels below Full should not track dup ACKs
+        for stealth in [StealthLevel::Off, StealthLevel::Basic, StealthLevel::Standard] {
+            let (count, last_acked, seq) =
+                simulate_dup_ack_tracking(stealth, 5000, 5000, 2, 8000);
+            // Should return unchanged values since no tracking happens
+            assert_eq!(count, 2, "stealth {:?}: dup count should not change", stealth);
+            assert_eq!(last_acked, 5000, "stealth {:?}: last_acked should not change", stealth);
+            assert_eq!(seq, 8000, "stealth {:?}: seq should not change", stealth);
+        }
+    }
+
+    #[test]
+    fn test_dup_ack_wrapping_seq_values() {
+        // Test with wrapping sequence numbers near u32::MAX
+        let stealth = StealthLevel::Full;
+        let acked = u32::MAX - 100;
+        let current_seq = u32::MAX;
+
+        // Third dup ACK with high seq values
+        let (count, _, seq) =
+            simulate_dup_ack_tracking(stealth, acked, acked, 2, current_seq);
+        assert_eq!(count, 3);
+        assert_eq!(seq, acked, "fast retransmit should work with high seq values");
     }
 }

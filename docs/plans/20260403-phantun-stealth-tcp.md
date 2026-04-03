@@ -144,12 +144,12 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 9: Duplicate ACK tracking (Level 3)
 
-- [ ] Write test: when same ACK received 3 times, trigger fast retransmit behavior
-- [ ] Write test: seq resets to acked position on triple dup ACK
-- [ ] Add to Socket: `dup_ack_count: AtomicU32`, `last_acked_seq: AtomicU32`
-- [ ] In recv path: count consecutive identical ACK values
-- [ ] When dup_ack_count >= 3: reset send-side seq to last_acked_seq (simulate fast retransmit)
-- [ ] Run `cargo test` — all pass
+- [x] Write test: when same ACK received 3 times, trigger fast retransmit behavior
+- [x] Write test: seq resets to acked position on triple dup ACK
+- [x] Add to Socket: `dup_ack_count: AtomicU32`, `last_acked_seq: AtomicU32`
+- [x] In recv path: count consecutive identical ACK values
+- [x] When dup_ack_count >= 3: reset send-side seq to last_acked_seq (simulate fast retransmit)
+- [x] Run `cargo test` — all pass
 
 ### Task 10: Send window constraint (Level 3)
 
