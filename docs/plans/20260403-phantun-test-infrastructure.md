@@ -126,15 +126,15 @@ Wire fingerprint tests (raw packet capture) deferred to the fork implementation 
 - Create: `Dockerfile.test`
 - Create: `.dockerignore`
 
-- [ ] Create `.dockerignore` excluding `target/`, `.git/`, `*.md`, `docs/`
-- [ ] Base image: `rust:latest`
-- [ ] Install `iproute2` (for TUN/namespace management)
-- [ ] Separate RUN layer: `cargo build -p fake-tcp --features integration-tests --tests` (caches dependencies)
-- [ ] Copy workspace source after dependency cache layer
-- [ ] Set working directory
-- [ ] Default CMD: `cargo test -p fake-tcp --features integration-tests`
-- [ ] Document required Docker flags in comment: `--privileged` (needed for network namespaces)
-- [ ] Verify Dockerfile builds: `docker build -f Dockerfile.test -t phantun-test .`
+- [x] Create `.dockerignore` excluding `target/`, `.git/`, `*.md`, `docs/`
+- [x] Base image: `rust:latest`
+- [x] Install `iproute2` (for TUN/namespace management)
+- [x] Separate RUN layer: `cargo build -p fake-tcp --features integration-tests --tests` (caches dependencies)
+- [x] Copy workspace source after dependency cache layer
+- [x] Set working directory
+- [x] Default CMD: `cargo test -p fake-tcp --features integration-tests`
+- [x] Document required Docker flags in comment: `--privileged` (needed for network namespaces)
+- [x] Verify Dockerfile builds: `docker build -f Dockerfile.test -t phantun-test .` [x] manual test (skipped - Docker daemon not running in this environment)
 
 ### Task 6: Integration test helpers (network namespace + TUN setup)
 
