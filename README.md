@@ -28,6 +28,7 @@ A lightweight and fast UDP to TCP obfuscator.
 * [Version compatibility](#version-compatibility)
 * [Documentations](#documentations)
 * [Performance](#performance)
+* [Testing](#testing)
 * [Future plans](#future-plans)
 * [Compariation to udp2raw](#compariation-to-udp2raw)
 * [License](#license)
@@ -347,10 +348,35 @@ Writeup on some of the techniques used in Phantun to achieve this performance re
 
 [Back to TOC](#table-of-contents)
 
+# Testing
+
+## Unit tests (macOS / Linux, no Docker required)
+
+```
+cargo test -p fake-tcp
+```
+
+Runs 25 unit tests covering `build_tcp_packet()` and `parse_ip_packet()` — packet structure, field values, checksums, and round-trips for both IPv4 and IPv6.
+
+## Integration tests (Linux + Docker, requires `--privileged`)
+
+Integration tests exercise the full handshake and data exchange using real TUN interfaces inside Linux network namespaces.
+
+```
+# Build the test image
+docker build -f Dockerfile.test -t phantun-test .
+
+# Run all tests (unit + integration)
+docker run --privileged phantun-test
+```
+
+`--privileged` is required for network namespace creation. The integration tests are gated behind `--features integration-tests` and are automatically enabled in the Docker image.
+
+[Back to TOC](#table-of-contents)
+
 # Future plans
 
 * Load balancing a single UDP stream into multiple TCP streams
-* Integration tests
 * Auto insertion/removal of required firewall rules
 
 [Back to TOC](#table-of-contents)

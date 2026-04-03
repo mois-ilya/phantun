@@ -194,8 +194,8 @@ Wire fingerprint tests (raw packet capture) deferred to the fork implementation 
 
 ### Task 11: [Final] Update documentation
 
-- [ ] Add test running instructions to README.md
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Add test running instructions to README.md
+- [x] Move this plan to `docs/plans/completed/`
 
 ## Technical Details
 
