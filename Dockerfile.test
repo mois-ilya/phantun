@@ -19,8 +19,10 @@ COPY fake-tcp/Cargo.toml fake-tcp/Cargo.toml
 COPY phantun/Cargo.toml phantun/Cargo.toml
 
 # Create stub lib/main files so cargo can resolve and download all dependencies
-RUN mkdir -p fake-tcp/src phantun/src && \
-    echo 'fn main() {}' > phantun/src/main.rs && \
+RUN mkdir -p fake-tcp/src phantun/src phantun/src/bin && \
+    echo '' > phantun/src/lib.rs && \
+    echo 'fn main() {}' > phantun/src/bin/client.rs && \
+    echo 'fn main() {}' > phantun/src/bin/server.rs && \
     echo '' > fake-tcp/src/lib.rs && \
     cargo build -p fake-tcp --features integration-tests 2>/dev/null || true && \
     rm -rf fake-tcp/src phantun/src
