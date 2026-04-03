@@ -727,6 +727,12 @@ impl Stack {
                                         State::Idle,
                                         shared.stealth,
                                     );
+                                    // Echo client's SYN tsval in SYN+ACK ts_ecr (RFC 7323)
+                                    if shared.stealth >= StealthLevel::Basic
+                                        && let Some((peer_tsval, _)) = parse_tcp_timestamps(&tcp_packet)
+                                    {
+                                        sock.ts_ecr.store(peer_tsval, Ordering::Relaxed);
+                                    }
                                     assert!(shared
                                         .tuples
                                         .write()

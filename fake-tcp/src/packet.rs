@@ -210,26 +210,23 @@ pub fn parse_tcp_timestamps(tcp_packet: &tcp::TcpPacket<'_>) -> Option<(u32, u32
     None
 }
 
-// TODO(security): panics on empty/short buffers instead of returning None.
-// buf[0] index panics on empty input; .unwrap() panics when buffer has valid
-// IP header but is too short for TCP. Malformed packet can crash the process.
-// See #[should_panic] tests in this file. Fix before stealth TCP work.
 pub fn parse_ip_packet(buf: &Bytes) -> Option<(IPPacket<'_>, tcp::TcpPacket<'_>)> {
-    if buf[0] >> 4 == 4 {
-        let v4 = ipv4::Ipv4Packet::new(buf).unwrap();
+    let version = (*buf.first()?) >> 4;
+    if version == 4 {
+        let v4 = ipv4::Ipv4Packet::new(buf)?;
         if v4.get_next_level_protocol() != ip::IpNextHeaderProtocols::Tcp {
             return None;
         }
 
-        let tcp = tcp::TcpPacket::new(&buf[IPV4_HEADER_LEN..]).unwrap();
+        let tcp = tcp::TcpPacket::new(buf.get(IPV4_HEADER_LEN..)?)?;
         Some((IPPacket::V4(v4), tcp))
-    } else if buf[0] >> 4 == 6 {
-        let v6 = ipv6::Ipv6Packet::new(buf).unwrap();
+    } else if version == 6 {
+        let v6 = ipv6::Ipv6Packet::new(buf)?;
         if v6.get_next_header() != ip::IpNextHeaderProtocols::Tcp {
             return None;
         }
 
-        let tcp = tcp::TcpPacket::new(&buf[IPV6_HEADER_LEN..]).unwrap();
+        let tcp = tcp::TcpPacket::new(buf.get(IPV6_HEADER_LEN..)?)?;
         Some((IPPacket::V6(v6), tcp))
     } else {
         None
@@ -603,23 +600,20 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_parse_panics_on_empty_buffer() {
+    fn test_parse_returns_none_on_empty_buffer() {
         let bytes = Bytes::new();
-        parse_ip_packet(&bytes);
+        assert!(parse_ip_packet(&bytes).is_none());
     }
 
     #[test]
-    #[should_panic]
-    fn test_parse_panics_on_ipv4_too_short_for_tcp() {
+    fn test_parse_returns_none_on_ipv4_too_short_for_tcp() {
         // 20-byte buffer with version=4 and protocol=TCP but no TCP header
-        // TcpPacket::new on empty slice unwraps None → panics
         let mut buf = vec![0u8; 20];
         buf[0] = 0x45; // version=4, IHL=5
         buf[8] = 64;   // TTL
         buf[9] = 6;    // TCP
         let bytes = Bytes::copy_from_slice(&buf);
-        parse_ip_packet(&bytes);
+        assert!(parse_ip_packet(&bytes).is_none());
     }
 
     // --- Task 3 (stealth plan): Realistic SYN fingerprint tests ---
