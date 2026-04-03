@@ -368,6 +368,10 @@ generally very hard to troubleshoot.
 While the TCP stack is fairly stable, the general expectation is that you should run same minor versions
 of Server/Client of Phantun on both ends to ensure maximum compatibility.
 
+When using stealth mode, both client and server must be configured with the same `--stealth` level.
+Mismatched stealth levels may cause connection failures due to differing TCP option layouts and window
+scale values.
+
 [Back to TOC](#table-of-contents)
 
 # Documentations
@@ -450,7 +454,7 @@ Here is a quick overview of comparison between those two to help you choose:
 | Multi-threaded                                   |       ✅       |         ❌         |
 | Throughput                                       |     Better    |        Good       |
 | Layer 3 mode                                     | TUN interface | Raw sockets + BPF |
-| Tunneling MTU overhead                           |    12 bytes   |      44 bytes     |
+| Tunneling MTU overhead                           | 12-24 bytes   |      44 bytes     |
 | Seprate TCP connections for each UDP connection  | Client/Server |    Server only    |
 | Anti-replay, encryption                          |       ❌       |         ✅         |
 | DPI evasion (stealth mode)                       |       ✅       |         ✅         |

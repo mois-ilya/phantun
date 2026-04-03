@@ -4,6 +4,7 @@ mod common;
 
 use bytes::BytesMut;
 use fake_tcp::packet::{build_tcp_packet, parse_ip_packet};
+use fake_tcp::StealthLevel;
 use pnet::packet::tcp;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -61,7 +62,7 @@ async fn test_server_rejects_nonzero_seq_syn() {
     let crafted_dst: SocketAddr = format!("10.0.1.1:{SERVER_PORT}").parse().unwrap();
     let syn_seq: u32 = 1; // non-zero → server must reject
 
-    let syn_pkt = build_tcp_packet(crafted_src, crafted_dst, syn_seq, 0, tcp::TcpFlags::SYN, None);
+    let syn_pkt = build_tcp_packet(crafted_src, crafted_dst, syn_seq, 0, tcp::TcpFlags::SYN, None, StealthLevel::Off, 0, 0, 0xFFFF);
     env.raw_client_tun
         .send(&syn_pkt)
         .await

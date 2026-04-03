@@ -180,37 +180,6 @@ pub fn build_tcp_packet(
     ip_buf.freeze()
 }
 
-/// Extract the TSval from TCP timestamp option (kind=8, len=10).
-/// Returns None if no timestamp option is found.
-pub fn parse_tcp_timestamp(tcp_packet: &tcp::TcpPacket<'_>) -> Option<u32> {
-    let opts = tcp_packet.get_options_raw();
-    let mut i = 0;
-    while i < opts.len() {
-        match opts[i] {
-            0 => break,        // End of options
-            1 => i += 1,       // NOP - single byte
-            8 if i + 9 < opts.len() && opts[i + 1] == 10 => {
-                // Timestamps: kind=8, len=10, tsval(4), tsecr(4)
-                let tsval = u32::from_be_bytes([opts[i + 2], opts[i + 3], opts[i + 4], opts[i + 5]]);
-                return Some(tsval);
-            }
-            _ => {
-                // Variable-length option: kind, len, data...
-                if i + 1 >= opts.len() {
-                    break;
-                }
-                let len = opts[i + 1] as usize;
-                if len < 2 {
-                    break; // malformed
-                }
-                i += len;
-                continue;
-            }
-        }
-    }
-    None
-}
-
 /// Parse both TSval and TSecr from TCP timestamp option.
 /// Returns `Some((tsval, tsecr))` if a valid timestamp option is found.
 pub fn parse_tcp_timestamps(tcp_packet: &tcp::TcpPacket<'_>) -> Option<(u32, u32)> {
@@ -993,7 +962,7 @@ mod tests {
         assert!(ts2 > ts1, "timestamps should be monotonically increasing: {} > {}", ts2, ts1);
     }
 
-    // --- parse_tcp_timestamp tests ---
+    // --- parse_tcp_timestamps tests ---
 
     #[test]
     fn test_parse_tcp_timestamp_from_data_packet() {
@@ -1002,7 +971,7 @@ mod tests {
         let ts_val = 55555u32;
         let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"x"), StealthLevel::Basic, ts_val, 0, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        let parsed = parse_tcp_timestamp(&tcp_pkt);
+        let parsed = parse_tcp_timestamps(&tcp_pkt).map(|(tsval, _)| tsval);
         assert_eq!(parsed, Some(ts_val));
     }
 
@@ -1013,7 +982,7 @@ mod tests {
         let ts_val = 77777u32;
         let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Basic, ts_val, 0, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        let parsed = parse_tcp_timestamp(&tcp_pkt);
+        let parsed = parse_tcp_timestamps(&tcp_pkt).map(|(tsval, _)| tsval);
         assert_eq!(parsed, Some(ts_val));
     }
 
@@ -1024,7 +993,7 @@ mod tests {
         // Stealth Off data packet has no options
         let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"x"), StealthLevel::Off, 0, 0, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        let parsed = parse_tcp_timestamp(&tcp_pkt);
+        let parsed = parse_tcp_timestamps(&tcp_pkt).map(|(tsval, _)| tsval);
         assert_eq!(parsed, None);
     }
 
@@ -1095,7 +1064,7 @@ mod tests {
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Off, 0, 0, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        let parsed = parse_tcp_timestamp(&tcp_pkt);
+        let parsed = parse_tcp_timestamps(&tcp_pkt).map(|(tsval, _)| tsval);
         assert_eq!(parsed, None);
     }
 
@@ -1225,7 +1194,7 @@ mod tests {
         );
         // Parse the peer's tsval from their packet
         let tcp_pkt = tcp::TcpPacket::new(&peer_pkt[20..]).unwrap();
-        let extracted_tsval = parse_tcp_timestamp(&tcp_pkt).expect("should parse peer tsval");
+        let extracted_tsval = parse_tcp_timestamps(&tcp_pkt).map(|(tsval, _)| tsval).expect("should parse peer tsval");
         assert_eq!(extracted_tsval, peer_tsval, "extracted tsval must match peer's tsval exactly");
 
         // Now build our response echoing it as ts_ecr
@@ -1254,7 +1223,7 @@ mod tests {
                 StealthLevel::Basic, peer_tsval, latest_peer_tsval, 0xFFFF,
             );
             let tcp_pkt = tcp::TcpPacket::new(&peer_pkt[20..]).unwrap();
-            let extracted = parse_tcp_timestamp(&tcp_pkt).expect("should parse");
+            let extracted = parse_tcp_timestamps(&tcp_pkt).map(|(tsval, _)| tsval).expect("should parse");
             // Simulate Socket updating ts_ecr
             latest_peer_tsval = extracted;
         }
@@ -1323,7 +1292,7 @@ mod tests {
         );
         // Server parses SYN and extracts client's tsval
         let syn_tcp = tcp::TcpPacket::new(&syn[20..]).unwrap();
-        let peer_tsval = parse_tcp_timestamp(&syn_tcp).expect("should extract client tsval from SYN");
+        let peer_tsval = parse_tcp_timestamps(&syn_tcp).map(|(tsval, _)| tsval).expect("should extract client tsval from SYN");
         assert_eq!(peer_tsval, client_tsval);
 
         // Server sends SYN+ACK, echoing client's tsval
@@ -1351,7 +1320,7 @@ mod tests {
             StealthLevel::Basic, client_tsval_1, 0, 0xFFFF,
         );
         let syn_tcp = tcp::TcpPacket::new(&syn[20..]).unwrap();
-        let server_sees_client_ts = parse_tcp_timestamp(&syn_tcp).unwrap();
+        let server_sees_client_ts = parse_tcp_timestamps(&syn_tcp).map(|(tsval, _)| tsval).unwrap();
 
         // Step 2: Server SYN+ACK (ts_ecr = client's tsval)
         let server_tsval_1 = 2000u32;
@@ -1361,7 +1330,7 @@ mod tests {
             StealthLevel::Basic, server_tsval_1, server_sees_client_ts, 0xFFFF,
         );
         let syn_ack_tcp = tcp::TcpPacket::new(&syn_ack[20..]).unwrap();
-        let client_sees_server_ts = parse_tcp_timestamp(&syn_ack_tcp).unwrap();
+        let client_sees_server_ts = parse_tcp_timestamps(&syn_ack_tcp).map(|(tsval, _)| tsval).unwrap();
         let (_, sa_ecr) = parse_tcp_timestamps(&syn_ack_tcp).unwrap();
         assert_eq!(sa_ecr, client_tsval_1, "SYN+ACK ecr = client SYN tsval");
 

@@ -211,7 +211,7 @@ Data: doff=5  (20 bytes) — no options
 
 **Level 1:**
 ```
-SYN:  doff=11 (44 bytes) — MSS(1460) + SACK_PERM + TS(val,0) + NOP + NOP + wscale(7) + NOP
+SYN:  doff=10 (40 bytes) — MSS(1460) + SACK_PERM + TS(val,0) + NOP + wscale(7)
 Data: doff=8  (32 bytes) — NOP + NOP + TS(val,ecr)
 Overhead vs level 0: +12 bytes per data packet (~0.8% on 1460-byte payload)
 ```

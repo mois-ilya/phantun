@@ -3,7 +3,7 @@
 // when compiled without it.
 #![cfg(feature = "integration-tests")]
 
-use fake_tcp::Stack;
+use fake_tcp::{Stack, StealthLevel};
 use std::net::Ipv4Addr;
 use std::process::Command;
 use tokio_tun::TunBuilder;
@@ -239,8 +239,8 @@ pub async fn setup_test_env() -> TestEnv {
     // ── 7. Build Stack objects ───────────────────────────────────────────────
     // Client Stack: local_ip = tun peer address (10.0.0.2)
     // Server Stack: local_ip = tun own address  (10.0.1.1)
-    let client_stack = Stack::new(client_tuns, tun_c_dest, None);
-    let server_stack = Stack::new(server_tuns, tun_s_addr, None);
+    let client_stack = Stack::new(client_tuns, tun_c_dest, None, StealthLevel::Off);
+    let server_stack = Stack::new(server_tuns, tun_s_addr, None, StealthLevel::Off);
     // Unwrap the raw TUN Vec into a single Tun for direct use in tests.
     let raw_client_tun = raw_tuns.into_iter().next().unwrap();
 
