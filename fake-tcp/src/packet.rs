@@ -286,6 +286,133 @@ mod tests {
         assert_eq!(opts[2], 3);  // wscale length
         assert_eq!(opts[3], 14); // wscale shift
     }
+
+    // --- Task 3: data and control packets ---
+
+    #[test]
+    fn test_ipv4_ack_data_total_length() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let payload = b"hello world";
+        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload));
+        // 20 (IPv4) + 20 (TCP, no options) + 11 (payload) = 51
+        assert_eq!(pkt.len(), 20 + 20 + payload.len());
+    }
+
+    #[test]
+    fn test_ipv4_ack_data_doff_no_options_window() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let payload = b"data";
+        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload));
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_data_offset(), 5, "doff=5 means 20-byte TCP header (no options)");
+        assert_eq!(tcp_pkt.get_options_raw().len(), 0, "no TCP options for data packets");
+        assert_eq!(tcp_pkt.get_window(), 0xFFFF);
+    }
+
+    #[test]
+    fn test_ipv4_ack_data_payload_bytes_match() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let payload = b"test payload bytes";
+        let pkt = build_tcp_packet(local, remote, 42, 99, tcp::TcpFlags::ACK, Some(payload));
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.payload(), payload);
+    }
+
+    #[test]
+    fn test_ipv4_ack_data_flags_ack_only() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let payload = b"data";
+        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload));
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::ACK, "only ACK flag set, no PSH");
+        assert_eq!(tcp_pkt.get_flags() & tcp::TcpFlags::PSH, 0, "PSH flag not set");
+    }
+
+    #[test]
+    fn test_rst_ack_flags_no_payload_seq_ack() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let seq = 0xDEADBEEFu32;
+        let ack = 0xCAFEBABEu32;
+        let pkt = build_tcp_packet(
+            local,
+            remote,
+            seq,
+            ack,
+            tcp::TcpFlags::RST | tcp::TcpFlags::ACK,
+            None,
+        );
+        // 20 (IPv4) + 20 (TCP) = 40, no payload
+        assert_eq!(pkt.len(), 40);
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::RST | tcp::TcpFlags::ACK);
+        assert_eq!(tcp_pkt.payload().len(), 0);
+        assert_eq!(tcp_pkt.get_sequence(), seq);
+        assert_eq!(tcp_pkt.get_acknowledgement(), ack);
+    }
+
+    #[test]
+    fn test_syn_ack_flags_and_options() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let pkt = build_tcp_packet(
+            local,
+            remote,
+            0,
+            1,
+            tcp::TcpFlags::SYN | tcp::TcpFlags::ACK,
+            None,
+        );
+        // SYN|ACK: wscale is set because SYN flag is present → 44 bytes
+        assert_eq!(pkt.len(), 44);
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::SYN | tcp::TcpFlags::ACK);
+        assert_eq!(tcp_pkt.get_data_offset(), 6);
+        let opts = tcp_pkt.get_options_raw();
+        assert_eq!(opts.len(), 4);
+        assert_eq!(opts[0], 1);  // NOP
+        assert_eq!(opts[1], 3);  // wscale kind
+        assert_eq!(opts[2], 3);  // wscale length
+        assert_eq!(opts[3], 14); // wscale shift=14
+    }
+
+    #[test]
+    fn test_ack_only_no_data_length() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, None);
+        // 20 (IPv4) + 20 (TCP, no options, no payload) = 40
+        assert_eq!(pkt.len(), 40);
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_data_offset(), 5);
+        assert_eq!(tcp_pkt.payload().len(), 0);
+    }
+
+    #[test]
+    fn test_ipv6_ack_data_tcp_checks() {
+        let local: SocketAddr = "[fd00::1]:1234".parse().unwrap();
+        let remote: SocketAddr = "[fd00::2]:5678".parse().unwrap();
+        let payload = b"ipv6 payload";
+        let seq = 100u32;
+        let ack = 200u32;
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload));
+        // 40 (IPv6) + 20 (TCP) + payload
+        assert_eq!(pkt.len(), 40 + 20 + payload.len());
+        let v6 = ipv6::Ipv6Packet::new(&pkt).unwrap();
+        assert_eq!(v6.get_version(), 6);
+        assert_eq!(v6.get_payload_length() as usize, 20 + payload.len());
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[40..]).unwrap();
+        assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::ACK);
+        assert_eq!(tcp_pkt.get_data_offset(), 5);
+        assert_eq!(tcp_pkt.get_window(), 0xFFFF);
+        assert_eq!(tcp_pkt.get_sequence(), seq);
+        assert_eq!(tcp_pkt.get_acknowledgement(), ack);
+        assert_eq!(tcp_pkt.payload(), payload);
+    }
 }
 
 #[cfg(all(test, feature = "benchmark"))]

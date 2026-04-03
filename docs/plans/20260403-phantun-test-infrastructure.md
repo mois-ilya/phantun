@@ -95,15 +95,15 @@ Wire fingerprint tests (raw packet capture) deferred to the fork implementation 
 **Files:**
 - Modify: `fake-tcp/src/packet.rs`
 
-- [ ] Test IPv4 ACK data packet: total length = 20 (IP) + 20 (TCP) + payload_len
-- [ ] Test IPv4 ACK data packet: doff=5, no TCP options, window=0xFFFF
-- [ ] Test IPv4 ACK data packet: payload bytes match input
-- [ ] Test IPv4 ACK data packet: flags = ACK only (no PSH)
-- [ ] Test RST packet: flags = RST|ACK, no payload, correct seq/ack
-- [ ] Test SYN|ACK packet: flags correct, options same as SYN (NOP + wscale)
-- [ ] Test packet with no payload (ACK-only, no data): length = IP + TCP headers only
-- [ ] Test IPv6 data packet: same TCP-level checks
-- [ ] Run `cargo test -p fake-tcp` — all pass
+- [x] Test IPv4 ACK data packet: total length = 20 (IP) + 20 (TCP) + payload_len
+- [x] Test IPv4 ACK data packet: doff=5, no TCP options, window=0xFFFF
+- [x] Test IPv4 ACK data packet: payload bytes match input
+- [x] Test IPv4 ACK data packet: flags = ACK only (no PSH)
+- [x] Test RST packet: flags = RST|ACK, no payload, correct seq/ack
+- [x] Test SYN|ACK packet: flags correct, options same as SYN (NOP + wscale)
+- [x] Test packet with no payload (ACK-only, no data): length = IP + TCP headers only
+- [x] Test IPv6 data packet: same TCP-level checks
+- [x] Run `cargo test -p fake-tcp` — all pass
 
 ### Task 4: Unit tests for `parse_ip_packet()` and round-trip
 
