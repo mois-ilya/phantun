@@ -183,9 +183,9 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 13: [Final] Update documentation
 
-- [ ] Update README.md with `--stealth` flag documentation
-- [ ] Document stealth levels and their trade-offs
-- [ ] Update project knowledge docs if new patterns discovered
+- [x] Update README.md with `--stealth` flag documentation
+- [x] Document stealth levels and their trade-offs
+- [x] Update project knowledge docs if new patterns discovered
 
 ## Technical Details
 
