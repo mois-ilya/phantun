@@ -4,7 +4,7 @@
 #   docker build -f Dockerfile.test -t phantun-test .
 #   docker run --privileged phantun-test
 
-FROM rust:1.94
+FROM rust:latest
 
 # Install iproute2 for TUN/network namespace management (ip netns, ip link, etc.)
 RUN apt-get update && apt-get install -y iproute2 && rm -rf /var/lib/apt/lists/*
