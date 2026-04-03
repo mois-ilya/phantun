@@ -10,12 +10,16 @@ use tokio_tun::TunBuilder;
 
 // ── unique-name helpers ──────────────────────────────────────────────────────
 
-/// 8-hex-char suffix guaranteed unique within this process, safe for parallel test runs.
+/// 8-hex-char suffix guaranteed unique across processes and within a process.
+/// Combines the PID (lower 16 bits) with a per-process atomic counter so that
+/// parallel test binaries (`cargo test` runs each integration test file as a
+/// separate process) never collide on namespace/interface names.
 fn unique_suffix() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{:08x}", n)
+    let pid = std::process::id();
+    format!("{:04x}{:04x}", pid as u16, n as u16)
 }
 
 // ── shell helpers ────────────────────────────────────────────────────────────
@@ -125,6 +129,7 @@ pub struct TestEnv {
     pub server_stack: Stack,
     /// Raw TUN device in ns-client for sending/receiving hand-crafted IP packets.
     /// Use src IP 10.0.2.2 in crafted packets; responses arrive here.
+    #[allow(dead_code)]
     pub raw_client_tun: tokio_tun::Tun,
     ns_client: String,
     ns_server: String,
