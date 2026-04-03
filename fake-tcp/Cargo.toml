@@ -13,6 +13,7 @@ packet oriented tunneling with minimum overhead.
 
 [features]
 benchmark = []
+integration-tests = []
 
 [dependencies]
 bytes = "1"

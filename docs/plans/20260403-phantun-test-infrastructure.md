@@ -71,9 +71,9 @@ Wire fingerprint tests (raw packet capture) deferred to the fork implementation 
 **Files:**
 - Modify: `fake-tcp/Cargo.toml`
 
-- [ ] Add `integration-tests = []` to the existing `[features]` section (alongside `benchmark`)
-- [ ] Verify `cargo test -p fake-tcp` still works (no tests yet, but compilation OK)
-- [ ] Verify `cargo test -p fake-tcp --features integration-tests` compiles
+- [x] Add `integration-tests = []` to the existing `[features]` section (alongside `benchmark`)
+- [x] Verify `cargo test -p fake-tcp` still works (no tests yet, but compilation OK)
+- [x] Verify `cargo test -p fake-tcp --features integration-tests` compiles
 
 ### Task 2: Unit tests for `build_tcp_packet()` — SYN packets
 
