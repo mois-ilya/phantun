@@ -89,7 +89,7 @@ fn create_tun_in_netns(
         let _guard = handle.enter();
         let tuns = TunBuilder::new()
             .name(&tun_name)
-            .packet_info(false)
+            .packet_info()
             .address(addr)
             .destination(dest)
             .up()
@@ -112,15 +112,21 @@ fn create_tun_in_netns(
 /// ```text
 /// ns-client                          ns-server
 ///   tun-c  10.0.0.1 <-> 10.0.0.2      tun-s  10.0.1.1 <-> 10.0.1.2
+///   tun-r  10.0.2.1 <-> 10.0.2.2      (raw TUN for crafted packets)
 ///   veth-c 10.1.0.1/30 ─────────────── veth-s 10.1.0.2/30
 ///   route  10.0.1.0/24 via 10.1.0.2    route  10.0.0.0/24 via 10.1.0.1
+///                                       route  10.0.2.0/24 via 10.1.0.1
 ///
 /// Client Stack local_ip = 10.0.0.2  (tun peer = tun_dest)
 /// Server Stack local_ip = 10.0.1.1  (tun local = tun_addr)
+/// raw_client_tun: TUN at 10.0.2.1<->10.0.2.2 for crafting raw IP packets
 /// ```
 pub struct TestEnv {
     pub client_stack: Stack,
     pub server_stack: Stack,
+    /// Raw TUN device in ns-client for sending/receiving hand-crafted IP packets.
+    /// Use src IP 10.0.2.2 in crafted packets; responses arrive here.
+    pub raw_client_tun: tokio_tun::Tun,
     ns_client: String,
     ns_server: String,
 }
@@ -152,13 +158,18 @@ pub async fn setup_test_env() -> TestEnv {
     let tun_c_name = format!("tc{sfx}"); // 10 chars
     let tun_s_name = format!("ts{sfx}"); // 10 chars
 
+    let tun_r_name = format!("tr{sfx}"); // 10 chars — raw TUN in ns_c
+
     // TUN point-to-point addresses.
     // Client tun: local=10.0.0.1, peer=10.0.0.2  →  Stack local_ip = 10.0.0.2
     // Server tun: local=10.0.1.1, peer=10.0.1.2  →  Stack local_ip = 10.0.1.1
+    // Raw tun:    local=10.0.2.1, peer=10.0.2.2  →  for crafted-packet tests
     let tun_c_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
     let tun_c_dest: Ipv4Addr = "10.0.0.2".parse().unwrap();
     let tun_s_addr: Ipv4Addr = "10.0.1.1".parse().unwrap();
     let tun_s_dest: Ipv4Addr = "10.0.1.2".parse().unwrap();
+    let tun_r_addr: Ipv4Addr = "10.0.2.1".parse().unwrap();
+    let tun_r_dest: Ipv4Addr = "10.0.2.2".parse().unwrap();
 
     // ── 1. Create network namespaces ─────────────────────────────────────────
     run_ip(&["netns", "add", &ns_c]);
@@ -183,10 +194,12 @@ pub async fn setup_test_env() -> TestEnv {
     //  so the tun interface exists when route add runs)
     let client_tuns = create_tun_in_netns(&ns_c, &tun_c_name, tun_c_addr, tun_c_dest);
     let server_tuns = create_tun_in_netns(&ns_s, &tun_s_name, tun_s_addr, tun_s_dest);
+    // Raw TUN in ns_c for crafting arbitrary packets (e.g. SYN with seq != 0).
+    let raw_tuns = create_tun_in_netns(&ns_c, &tun_r_name, tun_r_addr, tun_r_dest);
 
     // ── 5. Add cross-namespace routes ────────────────────────────────────────
     //  Client needs to reach the server's TUN subnet via the veth link.
-    //  Server needs to reach the client's TUN subnet via the veth link.
+    //  Server needs to reach the client's TUN subnets via the veth link.
     netns_exec(
         &ns_c,
         "ip",
@@ -196,6 +209,12 @@ pub async fn setup_test_env() -> TestEnv {
         &ns_s,
         "ip",
         &["route", "add", "10.0.0.0/24", "via", "10.1.0.1"],
+    );
+    // Server also needs a route back to the raw TUN subnet (10.0.2.0/24).
+    netns_exec(
+        &ns_s,
+        "ip",
+        &["route", "add", "10.0.2.0/24", "via", "10.1.0.1"],
     );
 
     // ── 6. Enable IPv4 forwarding in each namespace ──────────────────────────
@@ -207,10 +226,13 @@ pub async fn setup_test_env() -> TestEnv {
     // Server Stack: local_ip = tun own address  (10.0.1.1)
     let client_stack = Stack::new(client_tuns, tun_c_dest, None);
     let server_stack = Stack::new(server_tuns, tun_s_addr, None);
+    // Unwrap the raw TUN Vec into a single Tun for direct use in tests.
+    let raw_client_tun = raw_tuns.into_iter().next().unwrap();
 
     TestEnv {
         client_stack,
         server_stack,
+        raw_client_tun,
         ns_client: ns_c,
         ns_server: ns_s,
     }
