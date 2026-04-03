@@ -4,7 +4,7 @@
 #   docker build -f Dockerfile.test -t phantun-test .
 #   docker run --privileged phantun-test
 
-FROM rust:latest
+FROM rust:1.94
 
 # Install iproute2 for TUN/network namespace management (ip netns, ip link, etc.)
 RUN apt-get update && apt-get install -y iproute2 && rm -rf /var/lib/apt/lists/*
@@ -22,7 +22,7 @@ COPY phantun/Cargo.toml phantun/Cargo.toml
 RUN mkdir -p fake-tcp/src phantun/src && \
     echo 'fn main() {}' > phantun/src/main.rs && \
     echo '' > fake-tcp/src/lib.rs && \
-    cargo build -p fake-tcp --features integration-tests --tests 2>/dev/null || true && \
+    cargo build -p fake-tcp --features integration-tests 2>/dev/null || true && \
     rm -rf fake-tcp/src phantun/src
 
 # --- Source layer ---

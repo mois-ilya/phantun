@@ -11,8 +11,11 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/// Perform the handshake and return (client_socket, server_socket).
-async fn connected_pair() -> (fake_tcp::Socket, fake_tcp::Socket) {
+/// Perform the handshake and return (client_socket, server_socket, env).
+///
+/// The `TestEnv` must be kept alive for the duration of the test to prevent
+/// premature namespace cleanup (its `Drop` impl deletes the namespaces).
+async fn connected_pair() -> (fake_tcp::Socket, fake_tcp::Socket, common::TestEnv) {
     let mut env = common::setup_test_env().await;
     let server_addr: SocketAddr = format!("10.0.1.1:{SERVER_PORT}").parse().unwrap();
     env.server_stack.listen(SERVER_PORT);
@@ -27,7 +30,7 @@ async fn connected_pair() -> (fake_tcp::Socket, fake_tcp::Socket) {
         .expect("client connect returned None");
     let server_sock = server_sock.expect("accept timed out");
 
-    (client_sock, server_sock)
+    (client_sock, server_sock, env)
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -38,7 +41,7 @@ async fn connected_pair() -> (fake_tcp::Socket, fake_tcp::Socket) {
 /// intact, and that both sides are in Established state after the handshake.
 #[tokio::test]
 async fn test_send_client_to_server() {
-    let (client_sock, server_sock) = connected_pair().await;
+    let (client_sock, server_sock, _env) = connected_pair().await;
 
     let payload = b"hello from client";
     client_sock.send(payload).await.expect("client send failed");
@@ -57,7 +60,7 @@ async fn test_send_client_to_server() {
 /// Mirrors `test_send_client_to_server` in the reverse direction.
 #[tokio::test]
 async fn test_send_server_to_client() {
-    let (client_sock, server_sock) = connected_pair().await;
+    let (client_sock, server_sock, _env) = connected_pair().await;
 
     let payload = b"hello from server";
     server_sock.send(payload).await.expect("server send failed");
@@ -81,7 +84,7 @@ async fn test_send_server_to_client() {
 /// payloads arrive correctly confirms seq tracking is correct.
 #[tokio::test]
 async fn test_seq_increments_by_payload_len() {
-    let (client_sock, server_sock) = connected_pair().await;
+    let (client_sock, server_sock, _env) = connected_pair().await;
 
     // Send two payloads of known sizes.
     // Post-handshake: client seq = 1.
@@ -118,7 +121,7 @@ async fn test_seq_increments_by_payload_len() {
 /// packet or close the connection).
 #[tokio::test]
 async fn test_ack_updates_after_recv() {
-    let (client_sock, server_sock) = connected_pair().await;
+    let (client_sock, server_sock, _env) = connected_pair().await;
 
     // Client sends; server recvs → server ack = 1 + payload.len().
     let payload = b"ack-update-test";
@@ -153,7 +156,7 @@ async fn test_ack_updates_after_recv() {
 /// only possible if seq accumulates properly (seq += payload.len() per send).
 #[tokio::test]
 async fn test_multiple_sequential_sends_accumulate_seq() {
-    let (client_sock, server_sock) = connected_pair().await;
+    let (client_sock, server_sock, _env) = connected_pair().await;
 
     let payloads: &[&[u8]] = &[
         b"first-payload",

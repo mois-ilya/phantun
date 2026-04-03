@@ -71,7 +71,7 @@ fn create_tun_in_netns(
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<tokio_tun::Tun>>();
 
-    std::thread::spawn(move || {
+    let handle_thread = std::thread::spawn(move || {
         // 1. Open the namespace fd created by `ip netns add`.
         let ns_path = format!("/var/run/netns/{ns_name}");
         let ns_file = std::fs::File::open(&ns_path)
@@ -95,7 +95,10 @@ fn create_tun_in_netns(
         tx.send(tuns).unwrap();
     });
 
-    rx.recv().expect("TUN-creation thread panicked before sending")
+    let tuns = rx.recv().expect("TUN-creation thread panicked before sending");
+    // Join the thread to propagate any panic with its original message.
+    handle_thread.join().expect("TUN-creation thread panicked");
+    tuns
 }
 
 // ── public test environment ──────────────────────────────────────────────────

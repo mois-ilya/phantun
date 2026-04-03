@@ -259,6 +259,7 @@ dependencies = [
  "flume",
  "internet-checksum",
  "log",
+ "nix",
  "pnet",
  "rand",
  "tokio",
