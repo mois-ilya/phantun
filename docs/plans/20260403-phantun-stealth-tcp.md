@@ -177,7 +177,7 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 - [x] `--stealth 1`: SYN has MSS+SACK+TS+wscale, data has timestamps, ISN random, PSH on data
 - [x] `--stealth 2`: window varies, ACK updates frequently, ts_ecr correct
 - [x] `--stealth 3`: dup ACK handled, send window constrained, congestion simulated
-- [x] Run full test suite (unit + integration in Docker)
+- [x] Run full test suite (unit + integration in Docker) — integration tests MUST actually pass, not just unit tests
 - [x] Run linter: `cargo clippy` — all clean
 - ⚠️ ~~Benchmark: compare throughput at each stealth level vs level 0~~ — requires deployed instances, moved to Post-Completion
 
