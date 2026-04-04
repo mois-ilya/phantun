@@ -24,6 +24,10 @@ A lightweight and fast UDP to TCP obfuscator.
         * [Server](#server)
         * [Client](#client)
 * [Stealth mode](#stealth-mode)
+    * [Stealth levels](#stealth-levels)
+    * [Usage](#usage-1)
+    * [Performance impact](#performance-impact)
+    * [MTU with stealth mode](#mtu-with-stealth-mode)
 * [MTU overhead](#mtu-overhead)
     * [MTU calculation for WireGuard](#mtu-calculation-for-wireguard)
 * [Version compatibility](#version-compatibility)
@@ -464,7 +468,7 @@ Here is a quick overview of comparison between those two to help you choose:
 
 # License
 
-Copyright 2021-2025 Datong Sun (dndx@idndx.com)
+Copyright 2021-2026 Datong Sun (dndx@idndx.com)
 
 Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
 [https://www.apache.org/licenses/LICENSE-2.0](https://www.apache.org/licenses/LICENSE-2.0)> or the MIT license

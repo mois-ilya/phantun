@@ -291,13 +291,10 @@ impl Socket {
                 if self.stealth >= StealthLevel::Full {
                     let peer_win = self.peer_window.load(Ordering::Relaxed);
                     let cwnd = self.cwnd.load(Ordering::Relaxed);
-                    // Effective window is the minimum of non-zero constraints
-                    let effective_win = match (peer_win, cwnd) {
-                        (0, 0) => 0,
-                        (0, c) => c,
-                        (p, 0) => p,
-                        (p, c) => p.min(c),
-                    };
+                    // Effective window: use peer's advertised window if known,
+                    // otherwise fall back to cwnd alone (peer_window starts at 0
+                    // until the first data packet is received from the peer)
+                    let effective_win = if peer_win > 0 { peer_win.min(cwnd) } else { cwnd };
                     if effective_win > 0 {
                         let last_acked = self.last_acked_seq.load(Ordering::Relaxed);
                         let current_seq = self.seq.load(Ordering::Relaxed);
@@ -376,7 +373,11 @@ impl Socket {
                             }
                         }
 
-                        // Store peer's advertised receive window (scaled by wscale=7)
+                        // Store peer's advertised receive window (scaled by wscale=7).
+                        // NOTE: This assumes the peer also uses wscale=7, which is true
+                        // when both sides run the same stealth level (as documented in
+                        // README). Mismatched stealth levels will produce incorrect
+                        // window scaling.
                         let raw_window = tcp_packet.get_window() as u32;
                         self.peer_window.store(raw_window << 7, Ordering::Relaxed);
                     }
@@ -1251,13 +1252,17 @@ mod tests {
         payload_len: u32,
         last_acked_seq: u32,
         peer_window: u32,
+        cwnd: u32,
     ) -> (u32, u32) {
         let mut seq = current_seq;
-        if stealth >= StealthLevel::Full && peer_window > 0 {
-            let bytes_in_flight = seq.wrapping_sub(last_acked_seq);
-            if bytes_in_flight.wrapping_add(payload_len) > peer_window {
-                // Window exhausted: wrap seq back to last acked position
-                seq = last_acked_seq;
+        if stealth >= StealthLevel::Full {
+            let effective_win = if peer_window > 0 { peer_window.min(cwnd) } else { cwnd };
+            if effective_win > 0 {
+                let bytes_in_flight = seq.wrapping_sub(last_acked_seq);
+                if bytes_in_flight.wrapping_add(payload_len) > effective_win {
+                    // Window exhausted: wrap seq back to last acked position
+                    seq = last_acked_seq;
+                }
             }
         }
         (seq, seq.wrapping_add(payload_len))
@@ -1271,23 +1276,25 @@ mod tests {
         let peer_window = 65536u32; // 64KB window
         let payload_len = 1460u32;
 
+        let cwnd = 10 * 1460 * 100; // large cwnd so peer_window is the binding constraint
+
         // First send: seq=1000, bytes_in_flight=0, 0+1460 <= 65536 -> OK
         let (seq_used, new_seq) =
-            simulate_send_window_constraint(stealth, last_acked, payload_len, last_acked, peer_window);
+            simulate_send_window_constraint(stealth, last_acked, payload_len, last_acked, peer_window, cwnd);
         assert_eq!(seq_used, 1000, "first send should use current seq");
         assert_eq!(new_seq, 1000 + 1460);
 
         // Subsequent sends advance seq but stay within window
         let current_seq = last_acked + 60000; // 60000 bytes in flight
         let (seq_used, new_seq) =
-            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window);
+            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window, cwnd);
         assert_eq!(seq_used, current_seq, "should still be within window");
         assert_eq!(new_seq, current_seq + payload_len);
 
         // Send that would exceed window: 65000 + 1460 > 65536
         let current_seq = last_acked + 65000;
         let (seq_used, new_seq) =
-            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window);
+            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window, cwnd);
         assert_eq!(seq_used, last_acked, "should wrap back to last_acked when window exhausted");
         assert_eq!(new_seq, last_acked + payload_len);
     }
@@ -1300,10 +1307,12 @@ mod tests {
         let peer_window = 32768u32; // 32KB window
         let payload_len = 1460u32;
 
+        let cwnd = 10 * 1460 * 100; // large cwnd so peer_window is the binding constraint
+
         // seq has advanced far beyond window
         let current_seq = last_acked + 50000;
         let (seq_used, _) =
-            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window);
+            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window, cwnd);
         assert_eq!(seq_used, last_acked, "seq must wrap back to last_acked_seq");
     }
 
@@ -1315,26 +1324,36 @@ mod tests {
         let payload_len = 1460u32;
         let current_seq = last_acked + 5000; // way beyond window
 
+        let cwnd = 10 * 1460;
+
         for stealth in [StealthLevel::Off, StealthLevel::Basic, StealthLevel::Standard] {
             let (seq_used, new_seq) =
-                simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window);
+                simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window, cwnd);
             assert_eq!(seq_used, current_seq, "stealth {:?}: should not constrain seq", stealth);
             assert_eq!(new_seq, current_seq + payload_len);
         }
     }
 
     #[test]
-    fn test_send_window_constraint_zero_peer_window_skipped() {
-        // When peer_window is 0 (not yet received), constraint is skipped
+    fn test_send_window_constraint_zero_peer_window_falls_back_to_cwnd() {
+        // When peer_window is 0 (not yet received from peer), cwnd is the sole constraint
         let stealth = StealthLevel::Full;
         let last_acked = 1000u32;
         let peer_window = 0u32;
-        let current_seq = 99999u32;
         let payload_len = 1460u32;
+        let cwnd = 10 * 1460; // 14600
 
+        // Within cwnd: 5000 in flight + 1460 = 6460 < 14600
+        let current_seq = last_acked + 5000;
         let (seq_used, _) =
-            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window);
-        assert_eq!(seq_used, current_seq, "should not constrain when peer_window is 0");
+            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window, cwnd);
+        assert_eq!(seq_used, current_seq, "within cwnd should not wrap even with peer_window=0");
+
+        // Exceeds cwnd: 14000 in flight + 1460 = 15460 > 14600
+        let current_seq = last_acked + 14000;
+        let (seq_used, _) =
+            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window, cwnd);
+        assert_eq!(seq_used, last_acked, "should wrap when exceeding cwnd with peer_window=0");
     }
 
     #[test]
@@ -1346,14 +1365,16 @@ mod tests {
         let payload_len = 1000u32;
         let current_seq = 9000u32; // 9000 in flight, +1000 = 10000 = peer_window
 
+        let cwnd = 10 * 1460 * 100; // large cwnd so peer_window is the binding constraint
+
         let (seq_used, _) =
-            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window);
+            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window, cwnd);
         assert_eq!(seq_used, current_seq, "exactly at window boundary should not wrap");
 
         // But one byte over should wrap
         let current_seq = 9001u32;
         let (seq_used, _) =
-            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window);
+            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window, cwnd);
         assert_eq!(seq_used, last_acked, "one byte over window should wrap");
     }
 
@@ -1365,17 +1386,52 @@ mod tests {
         let peer_window = 1000u32;
         let payload_len = 100u32;
 
+        let cwnd = 10 * 1460 * 100; // large cwnd so peer_window is the binding constraint
+
         // current_seq within window (200 bytes in flight)
         let current_seq = u32::MAX - 300;
         let (seq_used, _) =
-            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window);
+            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window, cwnd);
         assert_eq!(seq_used, current_seq, "should be within window with wrapping");
 
         // current_seq exceeds window: 950 bytes in flight + 100 payload = 1050 > 1000
         let current_seq = last_acked.wrapping_add(950);
         let (seq_used, _) =
-            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window);
+            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window, cwnd);
         assert_eq!(seq_used, last_acked, "should wrap when exceeding window with wrapping seq");
+    }
+
+    #[test]
+    fn test_send_window_constraint_uses_min_of_peer_window_and_cwnd() {
+        // The effective window is min(peer_window, cwnd). When cwnd < peer_window,
+        // cwnd should be the binding constraint.
+        let stealth = StealthLevel::Full;
+        let last_acked = 0u32;
+        let payload_len = 1460u32;
+
+        // peer_window is large but cwnd is small -> cwnd constrains
+        let peer_window = 100_000u32;
+        let cwnd = 5000u32;
+        let current_seq = 4000u32; // 4000 in flight, +1460 = 5460 > cwnd(5000)
+        let (seq_used, _) =
+            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window, cwnd);
+        assert_eq!(seq_used, last_acked, "cwnd should constrain when smaller than peer_window");
+
+        // peer_window is small but cwnd is large -> peer_window constrains
+        let peer_window = 5000u32;
+        let cwnd = 100_000u32;
+        let current_seq = 4000u32; // 4000 in flight, +1460 = 5460 > peer_window(5000)
+        let (seq_used, _) =
+            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window, cwnd);
+        assert_eq!(seq_used, last_acked, "peer_window should constrain when smaller than cwnd");
+
+        // Both allow: within min(50000, 60000) = 50000
+        let peer_window = 50_000u32;
+        let cwnd = 60_000u32;
+        let current_seq = 40_000u32; // 40000 in flight, +1460 = 41460 < 50000
+        let (seq_used, _) =
+            simulate_send_window_constraint(stealth, current_seq, payload_len, last_acked, peer_window, cwnd);
+        assert_eq!(seq_used, current_seq, "should not constrain when within both windows");
     }
 
     // --- Task 11: Congestion simulation (Level 3) ---
