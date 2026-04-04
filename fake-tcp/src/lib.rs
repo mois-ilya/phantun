@@ -51,7 +51,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicU16, AtomicU32, Ordering},
     Arc, RwLock,
 };
 use std::time::Instant;
@@ -156,6 +156,14 @@ pub struct Socket {
     cwnd: AtomicU32,
     /// Slow start threshold in bytes (stealth >= Full)
     ssthresh: AtomicU32,
+    /// Highest sequence number ever sent (monotonically increasing, never rewound).
+    /// Used as true SND.NXT for ACK validation. Unlike `seq`, this is not reset
+    /// by window exhaustion or fast retransmit.
+    snd_nxt: AtomicU32,
+    /// Last peer advertised window seen (raw, unscaled) for dup ACK detection (stealth >= Full)
+    last_peer_window: AtomicU16,
+    /// Last window value we sent, reused for duplicate ACKs (stealth >= Standard)
+    last_window_sent: AtomicU16,
 }
 
 /// A socket that represents a unique TCP connection between a server and client.
@@ -215,6 +223,8 @@ impl Socket {
                 last_acked_seq: AtomicU32::new(initial_seq),
                 peer_window: AtomicU32::new(0),
                 // Initial cwnd = 10 * MSS (RFC 6928), ssthresh = 64KB
+                last_peer_window: AtomicU16::new(0),
+                last_window_sent: AtomicU16::new(0),
                 cwnd: AtomicU32::new(if stealth >= StealthLevel::Full {
                     10 * 1460
                 } else {
@@ -225,6 +235,7 @@ impl Socket {
                 } else {
                     0
                 }),
+                snd_nxt: AtomicU32::new(initial_seq),
             },
             incoming_tx,
         )
@@ -253,7 +264,27 @@ impl Socket {
 
     fn build_tcp_packet(&self, flags: u8, payload: Option<&[u8]>) -> Bytes {
         let ack = self.ack.load(Ordering::Relaxed);
+        let prev_ack = self.last_ack.load(Ordering::Relaxed);
         self.last_ack.store(ack, Ordering::Relaxed);
+
+        // Per RFC 5681, duplicate ACKs must carry the same advertised window.
+        // If we re-rolled jitter on every pure ACK, the peer's dup-ACK detector
+        // would see window updates instead of true duplicates. Reuse the
+        // previous window when sending a pure ACK with an unchanged ack number.
+        // Exclude SYN/SYN+ACK: handshake packets must always advertise a real
+        // window (last_window_sent starts at 0 and hasn't been set yet).
+        let is_syn = (flags & tcp::TcpFlags::SYN) != 0;
+        let window = if self.stealth >= StealthLevel::Standard
+            && !is_syn
+            && payload.is_none()
+            && ack == prev_ack
+        {
+            self.last_window_sent.load(Ordering::Relaxed)
+        } else {
+            let w = self.current_window();
+            self.last_window_sent.store(w, Ordering::Relaxed);
+            w
+        };
 
         build_tcp_packet(
             self.local_addr,
@@ -265,7 +296,7 @@ impl Socket {
             self.stealth,
             self.current_ts_val(),
             self.ts_ecr.load(Ordering::Relaxed),
-            self.current_window(),
+            window,
         )
     }
 
@@ -306,7 +337,17 @@ impl Socket {
                 }
 
                 let buf = self.build_tcp_packet(flags, Some(payload));
-                self.seq.fetch_add(payload.len() as u32, Ordering::Relaxed);
+                let new_seq = self.seq.fetch_add(payload.len() as u32, Ordering::Relaxed)
+                    .wrapping_add(payload.len() as u32);
+                // Advance snd_nxt to the highest seq ever sent (monotonically).
+                // This is used for ACK validation and is never rewound unlike self.seq.
+                let _ = self.snd_nxt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    if (new_seq.wrapping_sub(cur) as i32) > 0 {
+                        Some(new_seq)
+                    } else {
+                        None
+                    }
+                });
                 self.tun.send(&buf).await.ok().and(Some(()))
             }
             _ => unreachable!(),
@@ -342,7 +383,18 @@ impl Socket {
                     if self.stealth >= StealthLevel::Full {
                         let peer_ack = tcp_packet.get_acknowledgement();
                         let prev_acked = self.last_acked_seq.load(Ordering::Relaxed);
-                        if peer_ack == prev_acked {
+                        let snd_nxt = self.snd_nxt.load(Ordering::Relaxed);
+                        let is_pure_ack = tcp_packet.payload().is_empty();
+                        let peer_raw_window = tcp_packet.get_window();
+                        let prev_peer_window = self.last_peer_window.load(Ordering::Relaxed);
+
+                        if peer_ack == prev_acked && is_pure_ack && peer_raw_window == prev_peer_window
+                            && (snd_nxt.wrapping_sub(prev_acked) as i32) > 0
+                        {
+                            // Only count pure ACKs (no data) with unchanged advertised
+                            // window AND outstanding data (snd_nxt > last_acked) as
+                            // duplicate ACKs per RFC 5681. Packets with a changed window
+                            // are window updates, not dup ACKs.
                             let count = self.dup_ack_count.fetch_add(1, Ordering::Relaxed) + 1;
                             if count >= 3 {
                                 // Triple duplicate ACK: reset seq to last acked position
@@ -356,7 +408,13 @@ impl Socket {
                                 // Reset counter to prevent repeated halving on subsequent dups
                                 self.dup_ack_count.store(0, Ordering::Relaxed);
                             }
-                        } else {
+                        } else if (peer_ack.wrapping_sub(prev_acked) as i32) > 0
+                            && (snd_nxt.wrapping_sub(peer_ack) as i32) >= 0
+                        {
+                            // Accept ACKs that advance monotonically AND do not
+                            // exceed SND.NXT. ACKs past what we've sent are invalid
+                            // (could be injected by a middlebox) and are dropped to
+                            // prevent last_acked_seq from jumping ahead of seq.
                             self.last_acked_seq.store(peer_ack, Ordering::Relaxed);
                             self.dup_ack_count.store(0, Ordering::Relaxed);
                             // Congestion window growth on new ACK
@@ -375,15 +433,30 @@ impl Socket {
                                     self.cwnd.store((cwnd + increment.max(1)).min(MAX_CWND), Ordering::Relaxed);
                                 }
                             }
+                        } else {
+                            // Invalid ACK (beyond SND.NXT, stale, or reordered):
+                            // skip window updates to prevent a bogus advertised
+                            // window from shrinking the effective send window.
                         }
 
-                        // Store peer's advertised receive window (scaled by wscale=7).
-                        // NOTE: This assumes the peer also uses wscale=7, which is true
-                        // when both sides run the same stealth level (as documented in
-                        // README). Mismatched stealth levels will produce incorrect
-                        // window scaling.
-                        let raw_window = tcp_packet.get_window() as u32;
-                        self.peer_window.store(raw_window << 7, Ordering::Relaxed);
+                        // Only update peer window state for valid ACKs (dup or new).
+                        // Invalid ACKs (past SND.NXT, stale) must not influence the
+                        // send window or dup-ACK detection window comparison.
+                        let ack_is_valid = peer_ack == prev_acked
+                            || ((peer_ack.wrapping_sub(prev_acked) as i32) > 0
+                                && (snd_nxt.wrapping_sub(peer_ack) as i32) >= 0);
+                        if ack_is_valid {
+                            // Update last seen peer window for dup ACK detection
+                            self.last_peer_window.store(peer_raw_window, Ordering::Relaxed);
+
+                            // Store peer's advertised receive window (scaled by wscale=7).
+                            // NOTE: This assumes the peer also uses wscale=7, which is true
+                            // when both sides run the same stealth level (as documented in
+                            // README). Mismatched stealth levels will produce incorrect
+                            // window scaling.
+                            let raw_window = tcp_packet.get_window() as u32;
+                            self.peer_window.store(raw_window << 7, Ordering::Relaxed);
+                        }
                     }
 
                     let payload = tcp_packet.payload();
@@ -449,9 +522,11 @@ impl Socket {
                         {
                             // found our ACK
                             self.seq.fetch_add(1, Ordering::Relaxed);
-                            // Update last_acked_seq so Level 3 bytes_in_flight starts at 0
+                            // Update last_acked_seq and snd_nxt so Level 3
+                            // bytes_in_flight starts at 0
                             let new_seq = self.seq.load(Ordering::Relaxed);
                             self.last_acked_seq.store(new_seq, Ordering::Relaxed);
+                            self.snd_nxt.store(new_seq, Ordering::Relaxed);
                             self.state = State::Established;
 
                             info!("Connection from {:?} established", self.remote_addr);
@@ -505,9 +580,11 @@ impl Socket {
                                 self.seq.fetch_add(1, Ordering::Relaxed);
                                 self.ack
                                     .store(tcp_packet.get_sequence() + 1, Ordering::Relaxed);
-                                // Update last_acked_seq so Level 3 bytes_in_flight starts at 0
+                                // Update last_acked_seq and snd_nxt so Level 3
+                                // bytes_in_flight starts at 0
                                 let new_seq = self.seq.load(Ordering::Relaxed);
                                 self.last_acked_seq.store(new_seq, Ordering::Relaxed);
+                                self.snd_nxt.store(new_seq, Ordering::Relaxed);
 
                                 // send ACK to finish handshake
                                 let buf = self.build_tcp_packet(tcp::TcpFlags::ACK, None);
@@ -1117,15 +1194,26 @@ mod tests {
     /// Simulates the duplicate ACK tracking logic from Socket::recv().
     /// Returns (new_dup_ack_count, new_last_acked_seq, seq_result).
     /// After fast retransmit triggers, counter resets to 0 (matching real code).
+    /// `is_pure_ack`: true if the packet carries no payload (only pure ACKs
+    /// count as duplicate ACKs per RFC 5681).
+    /// `same_window`: true if the advertised window matches the previous packet
+    /// (per RFC 5681, changed windows make it a window update, not a dup ACK).
+    /// `snd_nxt`: the next sequence number we will send (ACKs past this are invalid).
+    #[allow(clippy::too_many_arguments)]
     fn simulate_dup_ack_tracking(
         stealth: StealthLevel,
         peer_ack: u32,
         prev_acked_seq: u32,
         prev_dup_count: u32,
         current_seq: u32,
+        is_pure_ack: bool,
+        same_window: bool,
+        snd_nxt: u32,
     ) -> (u32, u32, u32) {
         if stealth >= StealthLevel::Full {
-            if peer_ack == prev_acked_seq {
+            if peer_ack == prev_acked_seq && is_pure_ack && same_window
+                && (snd_nxt.wrapping_sub(prev_acked_seq) as i32) > 0
+            {
                 let new_count = prev_dup_count + 1;
                 if new_count >= 3 {
                     // Fast retransmit: reset seq, then reset counter
@@ -1133,9 +1221,14 @@ mod tests {
                 } else {
                     (new_count, prev_acked_seq, current_seq)
                 }
-            } else {
-                // New ACK value: reset counter to 0 (not 1)
+            } else if (peer_ack.wrapping_sub(prev_acked_seq) as i32) > 0
+                && (snd_nxt.wrapping_sub(peer_ack) as i32) >= 0
+            {
+                // New ACK that advances monotonically AND <= SND.NXT: reset counter
                 (0, peer_ack, current_seq)
+            } else {
+                // Stale/reordered ACK, ACK past SND.NXT, data packet, or window update: ignore
+                (prev_dup_count, prev_acked_seq, current_seq)
             }
         } else {
             // Below Full: no dup ACK tracking
@@ -1153,28 +1246,28 @@ mod tests {
 
         // Original ACK with value 5000: new peer_ack, count becomes 0
         let (count, last_acked, seq) =
-            simulate_dup_ack_tracking(stealth, acked_seq, 0, 0, current_seq);
+            simulate_dup_ack_tracking(stealth, acked_seq, 0, 0, current_seq, true, true, current_seq);
         assert_eq!(count, 0);
         assert_eq!(last_acked, acked_seq);
         assert_eq!(seq, current_seq, "no reset on original ACK");
 
         // First duplicate ACK: count becomes 1
         let (count, last_acked, seq) =
-            simulate_dup_ack_tracking(stealth, acked_seq, acked_seq, 0, current_seq);
+            simulate_dup_ack_tracking(stealth, acked_seq, acked_seq, 0, current_seq, true, true, current_seq);
         assert_eq!(count, 1);
         assert_eq!(last_acked, acked_seq);
         assert_eq!(seq, current_seq, "no reset on first dup ACK");
 
         // Second duplicate ACK: count becomes 2
         let (count, last_acked, seq) =
-            simulate_dup_ack_tracking(stealth, acked_seq, acked_seq, 1, current_seq);
+            simulate_dup_ack_tracking(stealth, acked_seq, acked_seq, 1, current_seq, true, true, current_seq);
         assert_eq!(count, 2);
         assert_eq!(last_acked, acked_seq);
         assert_eq!(seq, current_seq, "no reset on second dup ACK");
 
         // Third duplicate ACK: count reaches 3, triggers fast retransmit, counter resets
         let (count, last_acked, seq) =
-            simulate_dup_ack_tracking(stealth, acked_seq, acked_seq, 2, current_seq);
+            simulate_dup_ack_tracking(stealth, acked_seq, acked_seq, 2, current_seq, true, true, current_seq);
         assert_eq!(count, 0, "counter should reset after fast retransmit");
         assert_eq!(last_acked, acked_seq);
         assert_eq!(seq, acked_seq, "seq should reset to acked position on triple dup ACK");
@@ -1189,7 +1282,7 @@ mod tests {
 
         // Simulate the 3rd duplicate ACK (prev_dup_count=2 -> new_count=3 -> triggers)
         let (count, _, seq) =
-            simulate_dup_ack_tracking(stealth, acked_seq, acked_seq, 2, current_seq);
+            simulate_dup_ack_tracking(stealth, acked_seq, acked_seq, 2, current_seq, true, true, current_seq);
         assert_eq!(count, 0, "counter resets after retransmit");
         assert_eq!(seq, acked_seq, "seq must equal last_acked_seq after fast retransmit");
     }
@@ -1201,7 +1294,7 @@ mod tests {
 
         // Had 2 dup ACKs for seq 1000, now get ACK for seq 2000
         let (count, last_acked, seq) =
-            simulate_dup_ack_tracking(stealth, 2000, 1000, 2, 5000);
+            simulate_dup_ack_tracking(stealth, 2000, 1000, 2, 5000, true, true, 5000);
         assert_eq!(count, 0, "dup count should reset to 0 on new ACK value");
         assert_eq!(last_acked, 2000, "last_acked should update to new value");
         assert_eq!(seq, 5000, "seq should not change on new ACK");
@@ -1216,13 +1309,13 @@ mod tests {
 
         // 3rd dup triggers retransmit, counter resets to 0
         let (count, _, seq) =
-            simulate_dup_ack_tracking(stealth, acked, acked, 2, 9000);
+            simulate_dup_ack_tracking(stealth, acked, acked, 2, 9000, true, true, 9000);
         assert_eq!(count, 0, "counter resets after retransmit");
         assert_eq!(seq, acked, "seq resets on retransmit");
 
         // Next dup ACK: count goes to 1 (starting fresh)
         let (count, _, seq) =
-            simulate_dup_ack_tracking(stealth, acked, acked, 0, 9000);
+            simulate_dup_ack_tracking(stealth, acked, acked, 0, 9000, true, true, 9000);
         assert_eq!(count, 1, "counting starts fresh after reset");
         assert_eq!(seq, 9000, "no retransmit yet");
     }
@@ -1232,12 +1325,33 @@ mod tests {
         // Stealth levels below Full should not track dup ACKs
         for stealth in [StealthLevel::Off, StealthLevel::Basic, StealthLevel::Standard] {
             let (count, last_acked, seq) =
-                simulate_dup_ack_tracking(stealth, 5000, 5000, 2, 8000);
+                simulate_dup_ack_tracking(stealth, 5000, 5000, 2, 8000, true, true, 8000);
             // Should return unchanged values since no tracking happens
             assert_eq!(count, 2, "stealth {:?}: dup count should not change", stealth);
             assert_eq!(last_acked, 5000, "stealth {:?}: last_acked should not change", stealth);
             assert_eq!(seq, 8000, "stealth {:?}: seq should not change", stealth);
         }
+    }
+
+    #[test]
+    fn test_dup_ack_no_outstanding_data_not_counted() {
+        // Per RFC 5681, duplicate ACKs should only be counted when there is
+        // outstanding (unacknowledged) data in flight. When snd_nxt == last_acked,
+        // nothing is outstanding and dup ACKs should be ignored.
+        let stealth = StealthLevel::Full;
+        let acked = 5000u32;
+
+        // snd_nxt == acked means no data in flight
+        let (count, _, seq) =
+            simulate_dup_ack_tracking(stealth, acked, acked, 0, 9000, true, true, acked);
+        assert_eq!(count, 0, "no outstanding data: dup ACK should not increment counter");
+        assert_eq!(seq, 9000, "seq should not change");
+
+        // Even with prev_dup_count=2, should not trigger retransmit
+        let (count, _, seq) =
+            simulate_dup_ack_tracking(stealth, acked, acked, 2, 9000, true, true, acked);
+        assert_eq!(count, 2, "no outstanding data: counter should not advance");
+        assert_eq!(seq, 9000, "no retransmit without outstanding data");
     }
 
     #[test]
@@ -1249,9 +1363,95 @@ mod tests {
 
         // Third dup ACK with high seq values
         let (count, _, seq) =
-            simulate_dup_ack_tracking(stealth, acked, acked, 2, current_seq);
+            simulate_dup_ack_tracking(stealth, acked, acked, 2, current_seq, true, true, current_seq);
         assert_eq!(count, 0, "counter resets after retransmit");
         assert_eq!(seq, acked, "fast retransmit should work with high seq values");
+    }
+
+    #[test]
+    fn test_dup_ack_data_packets_not_counted() {
+        // Data packets (non-empty payload) with the same ACK should NOT
+        // count as duplicate ACKs per RFC 5681
+        let stealth = StealthLevel::Full;
+        let acked = 5000u32;
+
+        // Three data packets with same ACK should not trigger fast retransmit
+        let (count, _, seq) =
+            simulate_dup_ack_tracking(stealth, acked, acked, 0, 9000, false, true, 9000);
+        assert_eq!(count, 0, "data packet should not increment dup ACK counter");
+        assert_eq!(seq, 9000, "seq should not change");
+
+        let (count, _, seq) =
+            simulate_dup_ack_tracking(stealth, acked, acked, 0, 9000, false, true, 9000);
+        assert_eq!(count, 0);
+        assert_eq!(seq, 9000);
+
+        let (count, _, seq) =
+            simulate_dup_ack_tracking(stealth, acked, acked, 0, 9000, false, true, 9000);
+        assert_eq!(count, 0, "still no retransmit from data packets");
+        assert_eq!(seq, 9000);
+    }
+
+    #[test]
+    fn test_stale_ack_ignored() {
+        // A stale/reordered ACK that goes backwards should be ignored
+        let stealth = StealthLevel::Full;
+        let current_acked = 5000u32;
+
+        // Stale ACK with value 3000 (behind current 5000) should be ignored
+        let (count, last_acked, seq) =
+            simulate_dup_ack_tracking(stealth, 3000, current_acked, 0, 9000, true, true, 9000);
+        assert_eq!(count, 0, "stale ACK should not change dup count");
+        assert_eq!(last_acked, current_acked, "last_acked should not move backwards");
+        assert_eq!(seq, 9000, "seq should not change");
+    }
+
+    #[test]
+    fn test_ack_past_snd_nxt_ignored() {
+        // An ACK beyond what we've sent (past SND.NXT) should be ignored.
+        // This prevents a middlebox or buggy peer from corrupting last_acked_seq.
+        let stealth = StealthLevel::Full;
+        let prev_acked = 1000u32;
+        let snd_nxt = 5000u32; // we've sent up to seq 5000
+
+        // ACK for 6000 is past SND.NXT (5000) — should be dropped
+        let (count, last_acked, seq) =
+            simulate_dup_ack_tracking(stealth, 6000, prev_acked, 0, 9000, true, true, snd_nxt);
+        assert_eq!(count, 0, "ACK past SND.NXT should not change dup count");
+        assert_eq!(last_acked, prev_acked, "last_acked should not advance past SND.NXT");
+        assert_eq!(seq, 9000, "seq should not change");
+
+        // ACK exactly at SND.NXT is valid
+        let (count, last_acked, seq) =
+            simulate_dup_ack_tracking(stealth, snd_nxt, prev_acked, 0, 9000, true, true, snd_nxt);
+        assert_eq!(count, 0);
+        assert_eq!(last_acked, snd_nxt, "ACK at SND.NXT should be accepted");
+        assert_eq!(seq, 9000);
+    }
+
+    #[test]
+    fn test_window_update_not_counted_as_dup_ack() {
+        // Per RFC 5681, a pure ACK with a changed advertised window is a
+        // window update, not a duplicate ACK. It should NOT increment the
+        // dup ACK counter or trigger fast retransmit.
+        let stealth = StealthLevel::Full;
+        let acked = 5000u32;
+
+        // Three pure ACKs with same ACK number but different window (same_window=false)
+        let (count, _, seq) =
+            simulate_dup_ack_tracking(stealth, acked, acked, 0, 9000, true, false, 9000);
+        assert_eq!(count, 0, "window update should not increment dup ACK counter");
+        assert_eq!(seq, 9000, "seq should not change");
+
+        let (count, _, seq) =
+            simulate_dup_ack_tracking(stealth, acked, acked, 0, 9000, true, false, 9000);
+        assert_eq!(count, 0);
+        assert_eq!(seq, 9000);
+
+        let (count, _, seq) =
+            simulate_dup_ack_tracking(stealth, acked, acked, 0, 9000, true, false, 9000);
+        assert_eq!(count, 0, "three window updates should not trigger fast retransmit");
+        assert_eq!(seq, 9000);
     }
 
     // --- Task 10: Send window constraint (Level 3) ---
