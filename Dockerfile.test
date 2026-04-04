@@ -1,0 +1,38 @@
+# Dockerfile for running fake-tcp integration tests
+#
+# Requires privileged mode for network namespace management:
+#   docker build -f Dockerfile.test -t phantun-test .
+#   docker run --privileged phantun-test
+
+FROM rust:latest
+
+# Install iproute2 for TUN/network namespace management (ip netns, ip link, etc.)
+RUN apt-get update && apt-get install -y iproute2 && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# --- Dependency cache layer ---
+# Copy only manifest files so this layer is invalidated only when deps change,
+# not when source code changes.
+COPY Cargo.toml Cargo.lock ./
+COPY fake-tcp/Cargo.toml fake-tcp/Cargo.toml
+COPY phantun/Cargo.toml phantun/Cargo.toml
+
+# Create stub lib/main files so cargo can resolve and download all dependencies
+RUN mkdir -p fake-tcp/src phantun/src phantun/src/bin && \
+    echo '' > phantun/src/lib.rs && \
+    echo 'fn main() {}' > phantun/src/bin/client.rs && \
+    echo 'fn main() {}' > phantun/src/bin/server.rs && \
+    echo '' > fake-tcp/src/lib.rs && \
+    cargo build -p fake-tcp --features integration-tests 2>/dev/null || true && \
+    rm -rf fake-tcp/src phantun/src
+
+# --- Source layer ---
+# Copy the real source (invalidates the layer above only when source changes)
+COPY . .
+
+# Build test binaries (caches the compilation, separate from running)
+RUN cargo build -p fake-tcp --features integration-tests --tests
+
+# Run integration tests by default
+CMD ["cargo", "test", "-p", "fake-tcp", "--features", "integration-tests"]
