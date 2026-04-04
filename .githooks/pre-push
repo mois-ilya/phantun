@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+# pre-push: always full test suite
+# Skip: git push --no-verify
+
+echo "pre-push: full suite..."
+"$(git rev-parse --show-toplevel)/scripts/run-tests.sh"
