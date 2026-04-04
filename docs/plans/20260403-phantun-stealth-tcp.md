@@ -87,13 +87,13 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 3: Realistic SYN fingerprint (Level 1)
 
-- [x] Write tests: with stealth >= 1, SYN packet has MSS=1460, SACK_PERM, Timestamps, wscale=7, doff=11 (44 bytes header)
+- [x] Write tests: with stealth >= 1, SYN packet has MSS=1460, SACK_PERM, Timestamps, wscale=7, doff=10 (40 bytes header)
 - [x] Write tests: SYN+ACK has same options
 - [x] Write test: stealth 0 still produces old SYN format (NOP + wscale=14, doff=6)
 - [x] Extend `build_tcp_packet()` signature: add `stealth: StealthLevel` parameter
 - [x] When stealth >= 1 and SYN flag set, build options: MSS(1460) + SACK_PERM + Timestamps(tsval, 0) + NOP + wscale(7)
-- [x] Options layout (24 bytes): MSS(4) + SACK_PERM(2) + Timestamps(10) + NOP(1) + NOP(1) + NOP(1) + wscale(3) + NOP(2 padding) = 24 (doff=11, 44-byte header)
-- [ ] Verify options byte layout matches Linux kernel TCP SYN fingerprint
+- [x] Options layout (20 bytes): MSS(4) + SACK_PERM(2)+TS_hdr(2) + TS_val(4) + TS_ecr(4) + NOP(1)+wscale(3) = 20 (doff=10, 40-byte header) — matches Linux kernel tcp_options_write() compact encoding
+- [x] Verify options byte layout matches Linux kernel TCP SYN fingerprint
 - [x] Run `cargo test` — all pass
 
 ### Task 4: Timestamps state in Socket (Level 1)
@@ -211,7 +211,7 @@ Data: doff=5  (20 bytes) — no options
 
 **Level 1:**
 ```
-SYN:  doff=11 (44 bytes) — MSS(1460) + SACK_PERM + TS(val,0) + NOP padding + wscale(7)
+SYN:  doff=10 (40 bytes) — MSS(1460) + SACK_PERM+TS(val,0) + NOP + wscale(7) (compact Linux layout)
 Data: doff=8  (32 bytes) — NOP + NOP + TS(val,ecr)
 Overhead vs level 0: +12 bytes per data packet (~0.8% on 1460-byte payload)
 ```
