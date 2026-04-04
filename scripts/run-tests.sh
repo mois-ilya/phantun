@@ -2,12 +2,18 @@
 set -e
 
 # Run full test suite.
-# Inside Docker: cargo test directly (Linux, namespaces available).
+# Inside Docker as root: cargo test directly.
+# Inside Docker as non-root: sudo cargo test (needs sudoers entry + caps).
 # Outside Docker: build and run Dockerfile.test.
 
 if [ -f /.dockerenv ]; then
-    echo "Running tests directly (inside Docker)..."
-    cargo test -p fake-tcp --features integration-tests
+    if [ "$(id -u)" = "0" ]; then
+        echo "Running tests directly (inside Docker, root)..."
+        cargo test -p fake-tcp --features integration-tests
+    else
+        echo "Running tests via sudo (inside Docker, non-root)..."
+        sudo RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo /usr/local/cargo/bin/cargo test -p fake-tcp --features integration-tests
+    fi
 else
     echo "Running tests via Docker..."
     docker build -f Dockerfile.test -t phantun-test .
