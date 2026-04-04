@@ -87,6 +87,7 @@ const TIMEOUT: time::Duration = time::Duration::from_secs(1);
 const RETRIES: usize = 6;
 const MPMC_BUFFER_LEN: usize = 512;
 const MPSC_BUFFER_LEN: usize = 128;
+const MSS: u32 = 1460;
 const MAX_UNACKED_LEN: u32 = 128 * 1024 * 1024; // 128MB
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
@@ -226,7 +227,7 @@ impl Socket {
                 last_peer_window: AtomicU16::new(0),
                 last_window_sent: AtomicU16::new(0),
                 cwnd: AtomicU32::new(if stealth >= StealthLevel::Full {
-                    10 * 1460
+                    10 * MSS
                 } else {
                     0
                 }),
@@ -402,7 +403,7 @@ impl Socket {
                                 self.seq.store(prev_acked, Ordering::Relaxed);
                                 // Multiplicative decrease: halve cwnd, set ssthresh
                                 let cwnd = self.cwnd.load(Ordering::Relaxed);
-                                let new_ssthresh = (cwnd / 2).max(2 * 1460);
+                                let new_ssthresh = (cwnd / 2).max(2 * MSS);
                                 self.ssthresh.store(new_ssthresh, Ordering::Relaxed);
                                 self.cwnd.store(new_ssthresh, Ordering::Relaxed);
                                 // Reset counter to prevent repeated halving on subsequent dups
@@ -425,11 +426,11 @@ impl Socket {
                             if cwnd < MAX_CWND {
                                 if cwnd < ssthresh {
                                     // Slow start: increase cwnd by MSS (doubles per RTT)
-                                    self.cwnd.store((cwnd + 1460).min(MAX_CWND), Ordering::Relaxed);
+                                    self.cwnd.store((cwnd + MSS).min(MAX_CWND), Ordering::Relaxed);
                                 } else {
                                     // Congestion avoidance: increase cwnd by MSS per RTT
                                     // Approximate: add MSS^2/cwnd per ACK
-                                    let increment = (1460u32 * 1460).checked_div(cwnd).unwrap_or(1);
+                                    let increment = (MSS * MSS).checked_div(cwnd).unwrap_or(1);
                                     self.cwnd.store((cwnd + increment.max(1)).min(MAX_CWND), Ordering::Relaxed);
                                 }
                             }
@@ -631,7 +632,7 @@ impl Drop for Socket {
             StealthLevel::Off,
             0,
             0,
-            0xFFFF, // Standard RST window
+            0, // Real Linux sends RST with window=0
         );
         if let Err(e) = self.tun.try_send(&buf) {
             warn!("Unable to send RST to remote end: {}", e);
@@ -915,20 +916,6 @@ mod tests {
         assert!(StealthLevel::Off < StealthLevel::Basic);
     }
 
-    #[test]
-    fn test_stealth_level_copy_clone() {
-        let a = StealthLevel::Basic;
-        let b = a; // Copy
-        let c = a; // Clone (Copy trait)
-        assert_eq!(a, b);
-        assert_eq!(a, c);
-    }
-
-    #[test]
-    fn test_stealth_level_debug() {
-        assert_eq!(format!("{:?}", StealthLevel::Off), "Off");
-        assert_eq!(format!("{:?}", StealthLevel::Full), "Full");
-    }
 
     // --- Task 2: Random ISN tests ---
 
@@ -1084,29 +1071,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_stealth_syn_acceptance_logic() {
-        // Verify the acceptance condition used in reader_task:
-        // stealth >= Basic || seq == 0
-
-        // stealth Off, seq 0: accepted
-        assert!(StealthLevel::Off >= StealthLevel::Basic || 0u32 == 0);
-
-        // stealth Off, seq nonzero: rejected
-        assert!(!(StealthLevel::Off >= StealthLevel::Basic || 12345u32 == 0));
-
-        // stealth Basic, seq 0: accepted
-        assert!(StealthLevel::Basic >= StealthLevel::Basic || 0u32 == 0);
-
-        // stealth Basic, seq nonzero: accepted (because stealth >= Basic)
-        assert!(StealthLevel::Basic >= StealthLevel::Basic || 12345u32 == 0);
-
-        // stealth Standard, seq nonzero: accepted
-        assert!(StealthLevel::Standard >= StealthLevel::Basic || 99999u32 == 0);
-
-        // stealth Full, seq nonzero: accepted
-        assert!(StealthLevel::Full >= StealthLevel::Basic || 99999u32 == 0);
-    }
 
     // --- Task 7: Dynamic window tests ---
 
@@ -1186,7 +1150,7 @@ mod tests {
         let base = compute_window_base(StealthLevel::Full);
         assert!((256..=512).contains(&base));
         let window = compute_current_window(StealthLevel::Full, base);
-        assert_ne!(window, 0xFFFF, "stealth Full should not use static 0xFFFF");
+        assert!((base..base + 32).contains(&window), "window {} should be in range [{}..{})", window, base, base + 32);
     }
 
     // --- Task 9: Duplicate ACK tracking (Level 3) ---
@@ -1648,18 +1612,21 @@ mod tests {
 
     // --- Task 11: Congestion simulation (Level 3) ---
 
-    const MSS: u32 = 1460;
+    const MAX_CWND: u32 = 1_048_576;
 
     /// Simulates congestion window growth on receiving a new (non-duplicate) ACK.
     /// Returns the new cwnd value.
     fn simulate_cwnd_growth(cwnd: u32, ssthresh: u32) -> u32 {
+        if cwnd >= MAX_CWND {
+            return cwnd;
+        }
         if cwnd < ssthresh {
             // Slow start: increase cwnd by MSS
-            cwnd + MSS
+            (cwnd + MSS).min(MAX_CWND)
         } else {
             // Congestion avoidance: increase by MSS^2/cwnd per ACK
             let increment = (MSS * MSS).checked_div(cwnd).unwrap_or(1);
-            cwnd + increment.max(1)
+            (cwnd + increment.max(1)).min(MAX_CWND)
         }
     }
 

@@ -2,15 +2,13 @@
 set -e
 
 # pre-commit: always runs tests
-# RUN_TESTS=1 (Docker/Ralphex): clippy + cargo test directly
-# Otherwise (macOS/human): tests via Docker container
+# RUN_TESTS=1 (Docker/Ralphex): also runs clippy directly
 # Skip: git commit --no-verify
 
 if [ "$RUN_TESTS" = "1" ]; then
-    echo "pre-commit: clippy + tests (direct)..."
+    echo "pre-commit: clippy..."
     cargo clippy -p fake-tcp --verbose -- -D warnings
-    "$(git rev-parse --show-toplevel)/scripts/run-tests.sh"
-else
-    echo "pre-commit: tests (via Docker)..."
-    "$(git rev-parse --show-toplevel)/scripts/run-tests.sh"
 fi
+
+echo "pre-commit: tests..."
+"$(git rev-parse --show-toplevel)/scripts/run-tests.sh"
