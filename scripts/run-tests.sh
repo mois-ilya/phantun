@@ -12,7 +12,9 @@ if [ -f /.dockerenv ]; then
         cargo test -p fake-tcp --features integration-tests
     else
         echo "Running tests via sudo (inside Docker, non-root)..."
-        sudo RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo /usr/local/cargo/bin/cargo test -p fake-tcp --features integration-tests
+        sudo /usr/local/cargo/bin/cargo test -p fake-tcp --features integration-tests
+        # Fix ownership of cargo cache after root-privileged test run (Finding 2)
+        sudo chown -R "$(id -u):$(id -g)" /usr/local/cargo/registry /usr/local/cargo/git 2>/dev/null || true
     fi
 else
     echo "Running tests via Docker..."

@@ -519,7 +519,7 @@ impl Socket {
 
                         if tcp_packet.get_flags() == tcp::TcpFlags::ACK
                             && tcp_packet.get_acknowledgement()
-                                == self.seq.load(Ordering::Relaxed) + 1
+                                == self.seq.load(Ordering::Relaxed).wrapping_add(1)
                         {
                             // found our ACK
                             self.seq.fetch_add(1, Ordering::Relaxed);
@@ -575,12 +575,12 @@ impl Socket {
 
                             if tcp_packet.get_flags() == tcp::TcpFlags::SYN | tcp::TcpFlags::ACK
                                 && tcp_packet.get_acknowledgement()
-                                    == self.seq.load(Ordering::Relaxed) + 1
+                                    == self.seq.load(Ordering::Relaxed).wrapping_add(1)
                             {
                                 // found our SYN + ACK
                                 self.seq.fetch_add(1, Ordering::Relaxed);
                                 self.ack
-                                    .store(tcp_packet.get_sequence() + 1, Ordering::Relaxed);
+                                    .store(tcp_packet.get_sequence().wrapping_add(1), Ordering::Relaxed);
                                 // Update last_acked_seq and snd_nxt so Level 3
                                 // bytes_in_flight starts at 0
                                 let new_seq = self.seq.load(Ordering::Relaxed);
@@ -814,7 +814,7 @@ impl Stack {
                                         tun.clone(),
                                         local_addr,
                                         remote_addr,
-                                        Some(tcp_packet.get_sequence() + 1),
+                                        Some(tcp_packet.get_sequence().wrapping_add(1)),
                                         State::Idle,
                                         shared.stealth,
                                     );
@@ -837,7 +837,7 @@ impl Stack {
                                         local_addr,
                                         remote_addr,
                                         0,
-                                        tcp_packet.get_sequence() + tcp_packet.payload().len() as u32 + 1, // +1 because of SYN flag set
+                                        tcp_packet.get_sequence().wrapping_add(tcp_packet.payload().len() as u32).wrapping_add(1), // +1 because of SYN flag set
                                         tcp::TcpFlags::RST | tcp::TcpFlags::ACK,
                                         None,
                                         StealthLevel::Off,
@@ -848,16 +848,37 @@ impl Stack {
                                 }
                             } else if (tcp_packet.get_flags() & tcp::TcpFlags::RST) == 0 {
                                 info!("Unknown TCP packet from {}, sending RST", remote_addr);
+                                let flags = tcp_packet.get_flags();
+                                let has_ack = (flags & tcp::TcpFlags::ACK) != 0;
+
+                                let (rst_seq, rst_ack, rst_flags, rst_window) = if shared.stealth >= StealthLevel::Basic {
+                                    if has_ack {
+                                        // RFC 793: ACK set -> <SEQ=SEG.ACK><CTL=RST>
+                                        (tcp_packet.get_acknowledgement(), 0, tcp::TcpFlags::RST, 0)
+                                    } else {
+                                        // RFC 793: no ACK -> <SEQ=0><ACK=SEG.SEQ+SEG.LEN><CTL=RST,ACK>
+                                        let mut seg_len = tcp_packet.payload().len() as u32;
+                                        if (flags & tcp::TcpFlags::SYN) != 0 { seg_len += 1; }
+                                        if (flags & tcp::TcpFlags::FIN) != 0 { seg_len += 1; }
+                                        (0, tcp_packet.get_sequence().wrapping_add(seg_len), tcp::TcpFlags::RST | tcp::TcpFlags::ACK, 0)
+                                    }
+                                } else {
+                                    (tcp_packet.get_acknowledgement(),
+                                     tcp_packet.get_sequence().wrapping_add(tcp_packet.payload().len() as u32),
+                                     tcp::TcpFlags::RST | tcp::TcpFlags::ACK,
+                                     0xFFFF)
+                                };
+
                                 let buf = build_tcp_packet(
                                     local_addr,
                                     remote_addr,
-                                    tcp_packet.get_acknowledgement(),
-                                    tcp_packet.get_sequence() + tcp_packet.payload().len() as u32,
-                                    tcp::TcpFlags::RST | tcp::TcpFlags::ACK,
+                                    rst_seq,
+                                    rst_ack,
+                                    rst_flags,
                                     None,
                                     StealthLevel::Off,
                                     0, 0,
-                                    0xFFFF,
+                                    rst_window,
                                 );
                                 shared.tun[0].try_send(&buf).unwrap();
                             }
