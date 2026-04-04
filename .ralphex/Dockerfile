@@ -12,5 +12,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 # Verify installation
 RUN rustc --version && cargo --version
 
-# Install iproute2 for integration tests (TUN/network namespaces)
-RUN apk add --no-cache iproute2
+# Install iproute2 + iptables for integration tests (TUN/network namespaces + DNAT)
+RUN apk add --no-cache iproute2 iptables
+
+# Git hooks: always run full test suite on commit
+ENV RUN_TESTS=1
