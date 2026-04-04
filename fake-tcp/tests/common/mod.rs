@@ -3,7 +3,7 @@
 // when compiled without it.
 #![cfg(feature = "integration-tests")]
 
-use fake_tcp::Stack;
+use fake_tcp::{Stack, StealthLevel};
 use std::net::Ipv4Addr;
 use std::process::Command;
 use tokio_tun::TunBuilder;
@@ -236,11 +236,28 @@ pub async fn setup_test_env() -> TestEnv {
     netns_exec(&ns_c, "sysctl", &["-w", "net.ipv4.ip_forward=1"]);
     netns_exec(&ns_s, "sysctl", &["-w", "net.ipv4.ip_forward=1"]);
 
+    // ── 6b. DNAT in server namespace ────────────────────────────────────────
+    // Phantun requires DNAT to redirect incoming TCP from the physical interface
+    // to the TUN peer address.  Without this, the kernel in ns-server sees
+    // dst=10.0.1.1 (its own TUN local addr), handles the SYN in its own TCP
+    // stack, and sends RST — the packet never reaches the TUN device.
+    // DNAT rewrites dst to 10.0.1.2 (TUN peer), so the kernel routes it into
+    // the TUN.  Conntrack automatically reverses the rewrite on reply packets.
+    netns_exec(
+        &ns_s,
+        "iptables",
+        &[
+            "-t", "nat", "-A", "PREROUTING",
+            "-p", "tcp", "-d", "10.0.1.1",
+            "-j", "DNAT", "--to-destination", "10.0.1.2",
+        ],
+    );
+
     // ── 7. Build Stack objects ───────────────────────────────────────────────
     // Client Stack: local_ip = tun peer address (10.0.0.2)
     // Server Stack: local_ip = tun own address  (10.0.1.1)
-    let client_stack = Stack::new(client_tuns, tun_c_dest, None);
-    let server_stack = Stack::new(server_tuns, tun_s_addr, None);
+    let client_stack = Stack::new(client_tuns, tun_c_dest, None, StealthLevel::Off);
+    let server_stack = Stack::new(server_tuns, tun_s_addr, None, StealthLevel::Off);
     // Unwrap the raw TUN Vec into a single Tun for direct use in tests.
     let raw_client_tun = raw_tuns.into_iter().next().unwrap();
 

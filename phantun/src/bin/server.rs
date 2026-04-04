@@ -1,6 +1,6 @@
 use clap::{crate_version, Arg, ArgAction, Command};
 use fake_tcp::packet::MAX_PACKET_LEN;
-use fake_tcp::Stack;
+use fake_tcp::{Stack, StealthLevel};
 use log::{debug, error, info};
 use phantun::utils::{assign_ipv6_address, new_udp_reuseport};
 use std::fs;
@@ -101,6 +101,14 @@ async fn main() -> io::Result<()> {
                       Note: ensure this file's size does not exceed the MTU of the outgoing interface. \
                       The content is always sent out in a single packet and will not be further segmented")
         )
+        .arg(
+            Arg::new("stealth")
+                .long("stealth")
+                .required(false)
+                .value_name("LEVEL")
+                .help("Sets the stealth level (0-3). 0=off, 1=basic signatures, 2=stateful mimicry, 3=full simulation")
+                .default_value("0")
+        )
         .get_matches();
 
     let local_port: u16 = matches
@@ -146,6 +154,12 @@ async fn main() -> io::Result<()> {
         .get_one::<String>("handshake_packet")
         .map(fs::read)
         .transpose()?;
+    let stealth: StealthLevel = matches
+        .get_one::<String>("stealth")
+        .unwrap()
+        .parse::<u8>()
+        .expect("bad stealth level")
+        .into();
 
     let num_cpus = num_cpus::get();
     info!("{} cores available", num_cpus);
@@ -166,7 +180,7 @@ async fn main() -> io::Result<()> {
     info!("Created TUN device {}", tun[0].name());
 
     //thread::sleep(time::Duration::from_secs(5));
-    let mut stack = Stack::new(tun, tun_local, tun_local6);
+    let mut stack = Stack::new(tun, tun_local, tun_local6, stealth);
     stack.listen(local_port);
     info!("Listening on {}", local_port);
 

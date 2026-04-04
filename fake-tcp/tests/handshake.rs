@@ -4,6 +4,7 @@ mod common;
 
 use bytes::BytesMut;
 use fake_tcp::packet::{build_tcp_packet, parse_ip_packet};
+use fake_tcp::StealthLevel;
 use pnet::packet::tcp;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -61,21 +62,27 @@ async fn test_server_rejects_nonzero_seq_syn() {
     let crafted_dst: SocketAddr = format!("10.0.1.1:{SERVER_PORT}").parse().unwrap();
     let syn_seq: u32 = 1; // non-zero → server must reject
 
-    let syn_pkt = build_tcp_packet(crafted_src, crafted_dst, syn_seq, 0, tcp::TcpFlags::SYN, None);
+    let syn_pkt = build_tcp_packet(crafted_src, crafted_dst, syn_seq, 0, tcp::TcpFlags::SYN, None, StealthLevel::Off, 0, 0, 0xFFFF);
     env.raw_client_tun
         .send(&syn_pkt)
         .await
         .expect("raw TUN send failed");
 
-    // Read back the RST|ACK.  Filter out any non-TCP noise (shouldn't be any
-    // in an isolated namespace, but guard anyway).
-    let mut buf = BytesMut::zeroed(1500);
-    let n = timeout(TEST_TIMEOUT, env.raw_client_tun.recv(&mut buf))
-        .await
-        .expect("raw TUN recv timed out — server did not reply")
-        .expect("raw TUN recv error");
-    buf.truncate(n);
-    let frozen = buf.freeze();
+    // Read back the RST|ACK.  Skip any non-IPv4/TCP noise (e.g. IPv6 Router
+    // Solicitations that the kernel may inject on the TUN device).
+    let frozen = loop {
+        let mut buf = BytesMut::zeroed(1500);
+        let n = timeout(TEST_TIMEOUT, env.raw_client_tun.recv(&mut buf))
+            .await
+            .expect("raw TUN recv timed out — server did not reply")
+            .expect("raw TUN recv error");
+        buf.truncate(n);
+        let candidate = buf.freeze();
+        if parse_ip_packet(&candidate).is_some() {
+            break candidate;
+        }
+        // Not an IPv4/TCP packet — skip and try again.
+    };
 
     let (_ip, tcp_pkt) =
         parse_ip_packet(&frozen).expect("server reply is not a valid IP/TCP packet");

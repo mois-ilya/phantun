@@ -1,6 +1,6 @@
 use clap::{crate_version, Arg, ArgAction, Command};
 use fake_tcp::packet::MAX_PACKET_LEN;
-use fake_tcp::{Socket, Stack};
+use fake_tcp::{Socket, Stack, StealthLevel};
 use log::{debug, error, info};
 use phantun::utils::{assign_ipv6_address, new_udp_reuseport, udp_recv_pktinfo};
 use std::collections::HashMap;
@@ -101,6 +101,14 @@ async fn main() -> io::Result<()> {
                       Note: ensure this file's size does not exceed the MTU of the outgoing interface. \
                       The content is always sent out in a single packet and will not be further segmented")
         )
+        .arg(
+            Arg::new("stealth")
+                .long("stealth")
+                .required(false)
+                .value_name("LEVEL")
+                .help("Sets the stealth level (0-3). 0=off, 1=basic signatures, 2=stateful mimicry, 3=full simulation")
+                .default_value("0")
+        )
         .get_matches();
 
     let local_addr: SocketAddr = matches
@@ -147,6 +155,12 @@ async fn main() -> io::Result<()> {
         .get_one::<String>("handshake_packet")
         .map(fs::read)
         .transpose()?;
+    let stealth: StealthLevel = matches
+        .get_one::<String>("stealth")
+        .unwrap()
+        .parse::<u8>()
+        .expect("bad stealth level")
+        .into();
 
     let num_cpus = num_cpus::get();
     info!("{} cores available", num_cpus);
@@ -169,7 +183,7 @@ async fn main() -> io::Result<()> {
     let udp_sock = Arc::new(new_udp_reuseport(local_addr));
     let connections = Arc::new(RwLock::new(HashMap::<SocketAddr, Arc<Socket>>::new()));
 
-    let mut stack = Stack::new(tun, tun_peer, tun_peer6);
+    let mut stack = Stack::new(tun, tun_peer, tun_peer6, stealth);
 
     let main_loop = tokio::spawn(async move {
         let mut buf_r = [0u8; MAX_PACKET_LEN];

@@ -69,123 +69,123 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 1: Add StealthLevel enum and --stealth CLI flag
 
-- [ ] Create `StealthLevel` enum in `fake-tcp/src/lib.rs`: `Off(0)`, `Basic(1)`, `Standard(2)`, `Full(3)`
-- [ ] Implement `From<u8>` for StealthLevel with clamping
-- [ ] Add `stealth: StealthLevel` field to `Stack` and `Socket`
-- [ ] Thread `stealth` through `Stack::new()` → `Socket::new()` → `Socket::build_tcp_packet()`
-- [ ] Add `--stealth <LEVEL>` arg to `client.rs` and `server.rs` CLI (default: 0)
-- [ ] Write tests: StealthLevel parsing, default behavior, clamping
-- [ ] Run `cargo test` — all pass, `--stealth 0` behaves identically to current code
+- [x] Create `StealthLevel` enum in `fake-tcp/src/lib.rs`: `Off(0)`, `Basic(1)`, `Standard(2)`, `Full(3)`
+- [x] Implement `From<u8>` for StealthLevel with clamping
+- [x] Add `stealth: StealthLevel` field to `Stack` and `Socket`
+- [x] Thread `stealth` through `Stack::new()` → `Socket::new()` → `Socket::build_tcp_packet()`
+- [x] Add `--stealth <LEVEL>` arg to `client.rs` and `server.rs` CLI (default: 0)
+- [x] Write tests: StealthLevel parsing, default behavior, clamping
+- [x] Run `cargo test` — all pass, `--stealth 0` behaves identically to current code
 
 ### Task 2: Random ISN (Level 1)
 
-- [ ] Write tests: with stealth >= 1, SYN seq != 0; with stealth 0, SYN seq == 0
-- [ ] Write test: server with stealth >= 1 accepts SYN with any seq (not just 0)
-- [ ] In `Socket::new()`: when stealth >= 1, initialize `seq` from `rand::random::<u32>()`
-- [ ] In `reader_task`: when stealth >= 1, accept SYN with any seq value (remove `== 0` check)
-- [ ] Run `cargo test` — all pass
+- [x] Write tests: with stealth >= 1, SYN seq != 0; with stealth 0, SYN seq == 0
+- [x] Write test: server with stealth >= 1 accepts SYN with any seq (not just 0)
+- [x] In `Socket::new()`: when stealth >= 1, initialize `seq` from `rand::random::<u32>()`
+- [x] In `reader_task`: when stealth >= 1, accept SYN with any seq value (remove `== 0` check)
+- [x] Run `cargo test` — all pass
 
 ### Task 3: Realistic SYN fingerprint (Level 1)
 
-- [ ] Write tests: with stealth >= 1, SYN packet has MSS=1460, SACK_PERM, Timestamps, wscale=7, doff=10 (40 bytes header)
-- [ ] Write tests: SYN+ACK has same options
-- [ ] Write test: stealth 0 still produces old SYN format (NOP + wscale=14, doff=6)
-- [ ] Extend `build_tcp_packet()` signature: add `stealth: StealthLevel` parameter
-- [ ] When stealth >= 1 and SYN flag set, build options: MSS(1460) + SACK_PERM + Timestamps(tsval, 0) + NOP + wscale(7)
-- [ ] Options layout (20 bytes): MSS(4) + SACK_PERM(2) + Timestamps(10) + NOP(1) + NOP(1) + wscale(3) + NOP(1) = 22 → pad to 24 (doff=11, 44-byte header)
-- [ ] Verify options byte layout matches Linux kernel TCP SYN fingerprint
-- [ ] Run `cargo test` — all pass
+- [x] Write tests: with stealth >= 1, SYN packet has MSS=1460, SACK_PERM, Timestamps, wscale=7, doff=10 (40 bytes header)
+- [x] Write tests: SYN+ACK has same options
+- [x] Write test: stealth 0 still produces old SYN format (NOP + wscale=14, doff=6)
+- [x] Extend `build_tcp_packet()` signature: add `stealth: StealthLevel` parameter
+- [x] When stealth >= 1 and SYN flag set, build options: MSS(1460) + SACK_PERM + Timestamps(tsval, 0) + NOP + wscale(7)
+- [x] Options layout (20 bytes): MSS(4) + SACK_PERM(2)+TS_hdr(2) + TS_val(4) + TS_ecr(4) + NOP(1)+wscale(3) = 20 (doff=10, 40-byte header) — matches Linux kernel tcp_options_write() compact encoding
+- [x] Verify options byte layout matches Linux kernel TCP SYN fingerprint
+- [x] Run `cargo test` — all pass
 
 ### Task 4: Timestamps state in Socket (Level 1)
 
-- [ ] Write tests: timestamps increment monotonically on successive packets
-- [ ] Write test: ts_ecr = 0 on first SYN, then echoes peer's tsval after receiving
-- [ ] Add to Socket: `ts_val: AtomicU32` (local timestamp counter), `ts_ecr: AtomicU32` (last received peer tsval)
-- [ ] Initialize `ts_val` from `Instant::now()` converted to ms-granularity counter
-- [ ] In `build_tcp_packet()`: when stealth >= 1, always include NOP+NOP+Timestamps(tsval, tsecr) — 12 bytes, doff=8 for non-SYN
-- [ ] In recv path (`reader_task` or `Socket::recv()`): parse incoming TCP timestamps, update `ts_ecr`
-- [ ] Increment `ts_val` based on elapsed time (not per-packet, to avoid timing attacks)
-- [ ] Run `cargo test` — all pass
+- [x] Write tests: timestamps increment monotonically on successive packets
+- [x] Write test: ts_ecr = 0 on first SYN, then echoes peer's tsval after receiving
+- [x] Add to Socket: `ts_val: AtomicU32` (local timestamp counter), `ts_ecr: AtomicU32` (last received peer tsval)
+- [x] Initialize `ts_val` from `Instant::now()` converted to ms-granularity counter
+- [x] In `build_tcp_packet()`: when stealth >= 1, always include NOP+NOP+Timestamps(tsval, tsecr) — 12 bytes, doff=8 for non-SYN
+- [x] In recv path (`reader_task` or `Socket::recv()`): parse incoming TCP timestamps, update `ts_ecr`
+- [x] Increment `ts_val` based on elapsed time (not per-packet, to avoid timing attacks)
+- [x] Run `cargo test` — all pass
 
 ### Task 5: PSH flag on data packets (Level 1)
 
-- [ ] Write test: with stealth >= 1, data packets have PSH|ACK flags (not just ACK)
-- [ ] Write test: stealth 0 still uses plain ACK
-- [ ] In `Socket::send()`: when stealth >= 1, use `tcp::TcpFlags::PSH | tcp::TcpFlags::ACK`
-- [ ] Run `cargo test` — all pass
+- [x] Write test: with stealth >= 1, data packets have PSH|ACK flags (not just ACK)
+- [x] Write test: stealth 0 still uses plain ACK
+- [x] In `Socket::send()`: when stealth >= 1, use `tcp::TcpFlags::PSH | tcp::TcpFlags::ACK`
+- [x] Run `cargo test` — all pass
 
 ### Task 6: Frequent ACK updates (Level 2)
 
-- [ ] Write test: with stealth >= 2, ACK updates on every received packet (not 128MB threshold)
-- [ ] Write test: standalone ACK sent when receiving data without sending
-- [ ] Write test: stealth 0 and 1 keep 128MB threshold
-- [ ] Add `ack_update_mode` logic to `Socket::recv()`: when stealth >= 2, send ACK after each received packet if no data is being sent concurrently
-- [ ] Reduce/remove 128MB threshold for stealth >= 2
-- [ ] Piggyback ACK on next data send to minimize extra packets
-- [ ] Run `cargo test` — all pass
+- [x] Write test: with stealth >= 2, ACK updates on every received packet (not 128MB threshold)
+- [x] Write test: standalone ACK sent when receiving data without sending
+- [x] Write test: stealth 0 and 1 keep 128MB threshold
+- [x] Add `ack_update_mode` logic to `Socket::recv()`: when stealth >= 2, send ACK after each received packet if no data is being sent concurrently
+- [x] Reduce/remove 128MB threshold for stealth >= 2
+- [x] Piggyback ACK on next data send to minimize extra packets
+- [x] Run `cargo test` — all pass
 
 ### Task 7: Dynamic window (Level 2)
 
-- [ ] Write test: with stealth >= 2, window varies between packets (not static 0xFFFF)
-- [ ] Write test: window is in realistic range (e.g., 32K-64K base, randomized)
-- [ ] Write test: stealth 0 and 1 keep static 0xFFFF
-- [ ] Add `window_base: u16` and `window_rng: SmallRng` to Socket (or use thread-local RNG)
-- [ ] In `build_tcp_packet()`: when stealth >= 2, compute window = base + random_offset
-- [ ] Apply wscale to advertised window value (window = effective_window >> wscale)
-- [ ] Run `cargo test` — all pass
+- [x] Write test: with stealth >= 2, window varies between packets (not static 0xFFFF)
+- [x] Write test: window is in realistic range (e.g., 32K-64K base, randomized)
+- [x] Write test: stealth 0 and 1 keep static 0xFFFF
+- [x] Add `window_base: u16` to Socket; use thread-local RNG via `rand::random()` for jitter (lock-free)
+- [x] In `build_tcp_packet()`: added `window: u16` parameter; Socket computes window = base + random_offset when stealth >= 2
+- [x] Apply wscale to advertised window value (base 256-512 with wscale=7 = ~32K-64K effective)
+- [x] Run `cargo test` — all 83 tests pass, clippy clean
 
 ### Task 8: ts_ecr echo correctness (Level 2)
 
-- [ ] Write test: outgoing ts_ecr matches last received peer tsval exactly
-- [ ] Write test: after receiving multiple packets, ts_ecr reflects the latest
-- [ ] Verify `ts_ecr` update path in recv is atomic and consistent
-- [ ] Verify integration: handshake ts_ecr flow (SYN: ecr=0, SYN+ACK: ecr=peer_tsval, ACK: ecr=peer_tsval)
-- [ ] Run `cargo test` — all pass
+- [x] Write test: outgoing ts_ecr matches last received peer tsval exactly
+- [x] Write test: after receiving multiple packets, ts_ecr reflects the latest
+- [x] Verify `ts_ecr` update path in recv is atomic and consistent
+- [x] Verify integration: handshake ts_ecr flow (SYN: ecr=0, SYN+ACK: ecr=peer_tsval, ACK: ecr=peer_tsval)
+- [x] Run `cargo test` — all pass
 
 ### Task 9: Duplicate ACK tracking (Level 3)
 
-- [ ] Write test: when same ACK received 3 times, trigger fast retransmit behavior
-- [ ] Write test: seq resets to acked position on triple dup ACK
-- [ ] Add to Socket: `dup_ack_count: AtomicU32`, `last_acked_seq: AtomicU32`
-- [ ] In recv path: count consecutive identical ACK values
-- [ ] When dup_ack_count >= 3: reset send-side seq to last_acked_seq (simulate fast retransmit)
-- [ ] Run `cargo test` — all pass
+- [x] Write test: when same ACK received 3 times, trigger fast retransmit behavior
+- [x] Write test: seq resets to acked position on triple dup ACK
+- [x] Add to Socket: `dup_ack_count: AtomicU32`, `last_acked_seq: AtomicU32`
+- [x] In recv path: count consecutive identical ACK values
+- [x] When dup_ack_count >= 3: reset send-side seq to last_acked_seq (simulate fast retransmit)
+- [x] Run `cargo test` — all pass
 
 ### Task 10: Send window constraint (Level 3)
 
-- [ ] Write test: send-side seq does not advance beyond peer's advertised window
-- [ ] Write test: when window is exhausted, seq wraps back to acked position
-- [ ] Add to Socket: `peer_window: AtomicU32` (parsed from incoming packets)
-- [ ] In `Socket::send()`: check if `seq + payload_len` exceeds `last_acked_seq + peer_window`
-- [ ] If exceeds: wrap seq back to `last_acked_seq` (like udp2raw seq_mode 3)
-- [ ] Run `cargo test` — all pass
+- [x] Write test: send-side seq does not advance beyond peer's advertised window
+- [x] Write test: when window is exhausted, seq wraps back to acked position
+- [x] Add to Socket: `peer_window: AtomicU32` (parsed from incoming packets)
+- [x] In `Socket::send()`: check if `seq + payload_len` exceeds `last_acked_seq + peer_window`
+- [x] If exceeds: wrap seq back to `last_acked_seq` (like udp2raw seq_mode 3)
+- [x] Run `cargo test` — all pass
 
 ### Task 11: Congestion simulation (Level 3)
 
-- [ ] Write test: initial sends have gradually increasing burst size (slow start behavior)
-- [ ] Write test: after stable period, sending rate stabilizes (congestion avoidance)
-- [ ] Add to Socket: `cwnd: AtomicU32` (congestion window), `ssthresh: AtomicU32`
-- [ ] Implement minimal slow start: cwnd starts small, doubles each RTT estimate until ssthresh
-- [ ] Implement minimal congestion avoidance: cwnd grows linearly after ssthresh
-- [ ] On triple dup ACK: halve cwnd (multiplicative decrease)
-- [ ] This is the most performance-impacting change — document overhead in benchmarks
-- [ ] Run `cargo test` — all pass
+- [x] Write test: initial sends have gradually increasing burst size (slow start behavior)
+- [x] Write test: after stable period, sending rate stabilizes (congestion avoidance)
+- [x] Add to Socket: `cwnd: AtomicU32` (congestion window), `ssthresh: AtomicU32`
+- [x] Implement minimal slow start: cwnd starts small, doubles each RTT estimate until ssthresh
+- [x] Implement minimal congestion avoidance: cwnd grows linearly after ssthresh
+- [x] On triple dup ACK: halve cwnd (multiplicative decrease)
+- [x] This is the most performance-impacting change — document overhead in benchmarks
+- [x] Run `cargo test` — all 117 tests pass
 
 ### Task 12: Verify acceptance criteria
 
-- [ ] `--stealth 0`: all existing tests pass, byte-identical output to current code
-- [ ] `--stealth 1`: SYN has MSS+SACK+TS+wscale, data has timestamps, ISN random, PSH on data
-- [ ] `--stealth 2`: window varies, ACK updates frequently, ts_ecr correct
-- [ ] `--stealth 3`: dup ACK handled, send window constrained, congestion simulated
-- [ ] Run full test suite (unit + integration in Docker)
-- [ ] Run linter: `cargo clippy` — all clean
-- [ ] Benchmark: compare throughput at each stealth level vs level 0
+- [x] `--stealth 0`: all existing tests pass, byte-identical output to current code
+- [x] `--stealth 1`: SYN has MSS+SACK+TS+wscale, data has timestamps, ISN random, PSH on data
+- [x] `--stealth 2`: window varies, ACK updates frequently, ts_ecr correct
+- [x] `--stealth 3`: dup ACK handled, send window constrained, congestion simulated
+- [x] Run full test suite (unit + integration in Docker) — integration tests MUST actually pass, not just unit tests
+- [x] Run linter: `cargo clippy` — all clean
+- ⚠️ ~~Benchmark: compare throughput at each stealth level vs level 0~~ — requires deployed instances, moved to Post-Completion
 
 ### Task 13: [Final] Update documentation
 
-- [ ] Update README.md with `--stealth` flag documentation
-- [ ] Document stealth levels and their trade-offs
-- [ ] Update project knowledge docs if new patterns discovered
+- [x] Update README.md with `--stealth` flag documentation
+- [x] Document stealth levels and their trade-offs
+- [x] Update project knowledge docs if new patterns discovered
 
 ## Technical Details
 
@@ -211,7 +211,7 @@ Data: doff=5  (20 bytes) — no options
 
 **Level 1:**
 ```
-SYN:  doff=11 (44 bytes) — MSS(1460) + SACK_PERM + TS(val,0) + NOP + NOP + wscale(7) + NOP
+SYN:  doff=10 (40 bytes) — MSS(1460) + SACK_PERM+TS(val,0) + NOP + wscale(7) (compact Linux layout)
 Data: doff=8  (32 bytes) — NOP + NOP + TS(val,ecr)
 Overhead vs level 0: +12 bytes per data packet (~0.8% on 1460-byte payload)
 ```

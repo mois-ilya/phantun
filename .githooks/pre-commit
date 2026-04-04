@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+# pre-commit: always runs tests
+# RUN_TESTS=1 (Docker/Ralphex): also runs clippy directly
+# Skip: git commit --no-verify
+
+if [ "$RUN_TESTS" = "1" ]; then
+    echo "pre-commit: clippy..."
+    cargo clippy -p fake-tcp --verbose -- -D warnings
+fi
+
+echo "pre-commit: tests..."
+"$(git rev-parse --show-toplevel)/scripts/run-tests.sh"
