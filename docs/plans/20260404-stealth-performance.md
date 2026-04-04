@@ -3,8 +3,9 @@
 ## Overview
 - Add comprehensive benchmarks comparing performance across stealth levels 0–3
 - Two layers: micro-benchmarks (packet construction CPU overhead) and throughput (end-to-end data transfer through tunnel)
+- Throughput benchmarks in single-core (1 TUN queue, 1 connection) and multi-core (N TUN queues, N parallel connections) modes — matching the original README benchmark methodology
 - Migrate from unstable `#[bench]` (nightly-only) to criterion (stable Rust)
-- All benchmarks grouped by stealth level for easy comparison
+- All benchmarks grouped by stealth level and core count for easy comparison
 
 ## Context (from discovery)
 - **Existing benchmarks**: 3 `#[bench]` functions in `fake-tcp/src/packet.rs:1372-1437` — only StealthLevel::Off, requires nightly
@@ -59,7 +60,7 @@
 - [ ] Add `[[bench]] name = "packet_construction" harness = false` to `fake-tcp/Cargo.toml`
 - [ ] Create `fake-tcp/benches/packet_construction.rs` with criterion benchmark groups
 - [ ] Benchmark `build_tcp_packet` for all 4 stealth levels × 3 payload sizes (128, 512, 1460 bytes) = 12 benchmarks
-- [ ] Use realistic parameters per stealth level: Off → ts_val=0, ts_ecr=0, window=0xFFFF; Basic+ → ts_val=1000, ts_ecr=500, window=0xFFFF; Standard+ → ts_val=5000, ts_ecr=3000, window=29200 (Linux default)
+- [ ] Use realistic parameters per stealth level: Off → flags=ACK, ts_val=0, ts_ecr=0, window=0xFFFF; Basic+ → flags=ACK|PSH (as real code does for data), ts_val=1000, ts_ecr=500, window=0xFFFF; Standard+ → flags=ACK|PSH, ts_val=5000, ts_ecr=3000, window=29200. Note: Off ignores ts_val/ts_ecr — values are for API completeness only
 - [ ] Group benchmarks: `stealth_off/`, `stealth_basic/`, `stealth_standard/`, `stealth_full/` with payload size sub-benchmarks
 - [ ] Run `cargo bench -p fake-tcp --bench packet_construction` on macOS — must produce results
 - [ ] Run `cargo test -p fake-tcp` — must still pass
@@ -74,29 +75,32 @@
 - Modify: `fake-tcp/Cargo.toml` — add `[[bench]]` section for throughput, feature-gate with `integration-tests`
 
 - [ ] Add `[[bench]] name = "throughput" harness = false required-features = ["integration-tests"]` to `fake-tcp/Cargo.toml`
-- [ ] Extract `TestEnv` from `tests/common/mod.rs` into feature-gated module `src/testing.rs` (behind `integration-tests` feature) so both tests and benches can import it
+- [ ] Extract `TestEnv` and ALL helpers (`unique_suffix`, `run_ip`, `netns_exec`, `create_tun_in_netns`) from `tests/common/mod.rs` into `src/testing.rs` (behind `integration-tests` feature). Add `tun_queues: usize` parameter to `create_tun_in_netns` and call `.queues(tun_queues)` on `TunBuilder`
 - [ ] Update `tests/common/mod.rs` to re-export from `fake_tcp::testing` instead of duplicating
-- [ ] Parameterize `setup_test_env()` to accept `StealthLevel` via new `setup_test_env_with_stealth(level)` — original calls new fn with `StealthLevel::Off`
-- [ ] Add integration test: `setup_test_env_with_stealth(StealthLevel::Basic)` connects and sends data successfully
-- [ ] Create `fake-tcp/benches/throughput.rs` — create `tokio::Runtime` at benchmark group level, use `rt.block_on()` for setup and within `b.iter()`
-- [ ] Setup `TestEnv` once per stealth-level group (expensive: netns + iptables), iterate only the send/recv loop
-- [ ] Implement throughput: connect client→server, send 10MB in 1460-byte chunks, measure total time
-- [ ] Benchmark all 4 stealth levels; tune criterion `measurement_time` and `sample_size` for stable results
-- [ ] Group benchmarks: `throughput/stealth_off`, `throughput/stealth_basic`, `throughput/stealth_standard`, `throughput/stealth_full`
+- [ ] Parameterize setup: `setup_test_env_with_config(stealth: StealthLevel, tun_queues: usize)` — controls both stealth level and TUN queue count. Original `setup_test_env()` calls it with `(StealthLevel::Off, 1)`
+- [ ] TUN creation: pass `tun_queues` to `TunBuilder::new().queues(tun_queues)` for client and server TUNs. `raw_client_tun` always stays single-queue (not used by benchmarks)
+- [ ] Add integration test: `setup_test_env_with_config(StealthLevel::Basic, 1)` connects and sends data successfully
+- [ ] Add integration test: `setup_test_env_with_config(StealthLevel::Off, 4)` — verify multi-queue TUN connect + data transfer works before relying on it in benchmarks
+- [ ] Create `fake-tcp/benches/throughput.rs` with two benchmark group levels: core count (1, 4) × stealth level (0–3)
+- [ ] **Single-core mode**: `tokio::runtime::Builder::new_multi_thread().worker_threads(1)`, TUN with `.queues(1)`, 1 Socket pair sending 10MB
+- [ ] **Multi-core mode**: `tokio::runtime::Builder::new_multi_thread().worker_threads(N)`, TUN with `.queues(N)`, N parallel Socket pairs each sending 10MB/N concurrently via `JoinSet`. Note: `connect`/`accept` are `&mut self` — establish all N connections **sequentially**, then measure only the parallel send/recv loop
+- [ ] Setup `TestEnv` + establish N Socket pairs outside `b.iter()`. Only the send/recv loop over connected Sockets goes inside `b.iter()`. TestEnv creation is expensive (~500ms: netns + iptables), must be amortized across iterations
+- [ ] Tune criterion `measurement_time` and `sample_size` for stable results
+- [ ] Group benchmarks: `throughput/{cores}core/stealth_{level}` — e.g. `throughput/1core/stealth_off`, `throughput/4core/stealth_full`
 - [ ] Run in Docker: `cargo bench -p fake-tcp --bench throughput --features integration-tests` — must produce results
-- [ ] Run `cargo test -p fake-tcp --features integration-tests` in Docker — must still pass (including new stealth setup test)
+- [ ] Run `cargo test -p fake-tcp --features integration-tests` in Docker — must still pass (including new config setup test)
 
 ### Task 4: Add benchmark runner script
 
 **Files:**
 - Create: `scripts/run-benchmarks.sh` — auto-detects environment like `run-tests.sh`
 
-- [ ] Create `scripts/run-benchmarks.sh` with Docker auto-detection (same pattern as `run-tests.sh`)
-- [ ] Outside Docker: build `Dockerfile.test`, run with CMD override: `docker run --privileged --rm phantun-test cargo bench -p fake-tcp --features integration-tests`
+- [ ] Create `scripts/run-benchmarks.sh` with environment detection (same pattern as `run-tests.sh`)
 - [ ] Inside Docker: run `cargo bench -p fake-tcp --bench packet_construction` + `cargo bench -p fake-tcp --bench throughput --features integration-tests`
-- [ ] On macOS without Docker: run only `cargo bench -p fake-tcp --bench packet_construction` (throughput needs Linux)
+- [ ] Outside Docker + Docker available: build `Dockerfile.test`, run with CMD override: `docker run --privileged --rm phantun-test cargo bench -p fake-tcp --features integration-tests`
+- [ ] Outside Docker + no Docker: run only `cargo bench -p fake-tcp --bench packet_construction` (throughput needs Linux/Docker)
 - [ ] Make script executable (`chmod +x`)
-- [ ] Test script locally on macOS (should run micro-benchmarks only)
+- [ ] Test script locally on macOS
 
 ### Task 5: Verify acceptance criteria
 
@@ -118,10 +122,13 @@
 
 ### Benchmark matrix
 
-| Benchmark | Stealth Levels | Payload Sizes | Environment |
+| Benchmark | Stealth Levels | Params | Environment |
 |---|---|---|---|
-| `build_tcp_packet` | Off, Basic, Standard, Full | 128, 512, 1460 bytes | macOS/Linux (stable) |
-| Throughput | Off, Basic, Standard, Full | 1MB total transfer | Linux/Docker only |
+| `build_tcp_packet` | Off, Basic, Standard, Full | 3 payload sizes (128, 512, 1460) | macOS/Linux (stable) |
+| Throughput 1-core | Off, Basic, Standard, Full | 1 TUN queue, 1 connection, 10MB | Linux/Docker only |
+| Throughput 4-core | Off, Basic, Standard, Full | 4 TUN queues, 4 connections, 10MB total | Linux/Docker only |
+
+Total: 12 micro + 8 throughput = 20 benchmarks
 
 ### Criterion group structure
 ```
@@ -132,23 +139,37 @@ packet_construction/
   stealth_basic/128
   ...
 throughput/
-  stealth_off
-  stealth_basic
-  stealth_standard
-  stealth_full
+  1core/stealth_off
+  1core/stealth_basic
+  1core/stealth_standard
+  1core/stealth_full
+  4core/stealth_off
+  4core/stealth_basic
+  4core/stealth_standard
+  4core/stealth_full
 ```
 
 ### TestEnv code sharing
 `tests/common/mod.rs` cannot be imported from `benches/`. Solution: extract `TestEnv` into `src/testing.rs` behind `#[cfg(feature = "integration-tests")]`, then both `tests/` and `benches/` import via `fake_tcp::testing::TestEnv`.
 
 ### TestEnv parameterization
-Currently `setup_test_env()` hardcodes `StealthLevel::Off`. Add `setup_test_env_with_stealth(level: StealthLevel)`. Original function calls new one with `StealthLevel::Off` — zero breakage for existing tests.
+Currently `setup_test_env()` hardcodes `StealthLevel::Off` and creates single-queue TUNs. Add `setup_test_env_with_config(stealth: StealthLevel, tun_queues: usize)`. Original `setup_test_env()` calls new fn with `(StealthLevel::Off, 1)` — zero breakage.
+
+### Multi-core scaling model
+Phantun's multi-core scaling comes from three layers working together:
+1. **Multi-queue TUN** — `TunBuilder::new().queues(N)` creates N kernel-level packet queues
+2. **Stack reader tasks** — `Stack::new(tun_vec)` spawns one reader per TUN fd
+3. **Parallel connections** — N Socket pairs sending concurrently saturate all queues
+
+All three must scale together. 4 worker threads with 1 TUN queue won't scale — bottleneck is the single fd. The benchmark controls all three via `(worker_threads, tun_queues, num_connections)` = `(N, N, N)`.
 
 ### Async runtime in criterion
 Criterion's iteration loop is synchronous. Strategy:
-- Create `tokio::Runtime::new()` at benchmark group level
-- Call `rt.block_on(setup_test_env_with_stealth(level))` once before iterations (expensive: netns + iptables)
-- Inside `b.iter()`: only `rt.block_on(send_recv_loop())` — the hot path
+- **Single-core**: `tokio::runtime::Builder::new_multi_thread().worker_threads(1).build()`
+- **Multi-core**: `tokio::runtime::Builder::new_multi_thread().worker_threads(4).build()`
+- Call `rt.block_on(setup_test_env_with_config(level, N))` once before iterations (expensive: netns + iptables)
+- Inside `b.iter()`: `rt.block_on(send_recv_loop())` — the hot path
+- Multi-core send_recv_loop: spawn N tasks via `JoinSet`, each task sends 10MB/N through its own Socket pair, await all
 - Use `criterion::BenchmarkGroup::measurement_time()` and `sample_size()` for stable results
 
 ### Micro-benchmark parameters per stealth level
