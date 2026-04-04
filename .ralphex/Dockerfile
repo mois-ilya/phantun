@@ -17,3 +17,4 @@ RUN apk add --no-cache iproute2 iptables
 
 # Git hooks: always run full test suite on commit
 ENV RUN_TESTS=1
+RUN git config --global core.hooksPath .githooks

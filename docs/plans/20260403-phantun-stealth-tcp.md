@@ -87,13 +87,13 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 
 ### Task 3: Realistic SYN fingerprint (Level 1)
 
-- [x] Write tests: with stealth >= 1, SYN packet has MSS=1460, SACK_PERM, Timestamps, wscale=7, doff=10 (40 bytes header)
+- [x] Write tests: with stealth >= 1, SYN packet has MSS=1460, SACK_PERM, Timestamps, wscale=7, doff=11 (44 bytes header)
 - [x] Write tests: SYN+ACK has same options
 - [x] Write test: stealth 0 still produces old SYN format (NOP + wscale=14, doff=6)
 - [x] Extend `build_tcp_packet()` signature: add `stealth: StealthLevel` parameter
 - [x] When stealth >= 1 and SYN flag set, build options: MSS(1460) + SACK_PERM + Timestamps(tsval, 0) + NOP + wscale(7)
-- [x] Options layout (20 bytes): MSS(4) + SACK_PERM(2) + Timestamps(10) + NOP(1) + wscale(3) = 20 (doff=10, 40-byte header)
-- [x] Verify options byte layout matches Linux kernel TCP SYN fingerprint
+- [x] Options layout (24 bytes): MSS(4) + SACK_PERM(2) + Timestamps(10) + NOP(1) + NOP(1) + NOP(1) + wscale(3) + NOP(2 padding) = 24 (doff=11, 44-byte header)
+- [ ] Verify options byte layout matches Linux kernel TCP SYN fingerprint
 - [x] Run `cargo test` — all pass
 
 ### Task 4: Timestamps state in Socket (Level 1)
@@ -169,17 +169,17 @@ Each level includes all previous levels. Default: `--stealth 0` (current behavio
 - [x] Implement minimal congestion avoidance: cwnd grows linearly after ssthresh
 - [x] On triple dup ACK: halve cwnd (multiplicative decrease)
 - [x] This is the most performance-impacting change — document overhead in benchmarks
-- [x] Run `cargo test` — all 111 tests pass
+- [x] Run `cargo test` — all 117 tests pass
 
 ### Task 12: Verify acceptance criteria
 
-- [x] `--stealth 0`: all existing tests pass, byte-identical output to current code
+- [ ] `--stealth 0`: all existing tests pass, byte-identical output to current code
 - [x] `--stealth 1`: SYN has MSS+SACK+TS+wscale, data has timestamps, ISN random, PSH on data
 - [x] `--stealth 2`: window varies, ACK updates frequently, ts_ecr correct
 - [x] `--stealth 3`: dup ACK handled, send window constrained, congestion simulated
-- [x] Run full test suite (unit + integration in Docker) — 111 unit tests pass; Docker integration not available in CI
-- [x] Run linter: `cargo clippy` — all clean
-- [x] Benchmark: compare throughput at each stealth level vs level 0 (skipped - requires deployed instances, see Post-Completion section)
+- [ ] Run full test suite (unit + integration in Docker)
+- [ ] Run linter: `cargo clippy` — all clean
+- ⚠️ ~~Benchmark: compare throughput at each stealth level vs level 0~~ — requires deployed instances, moved to Post-Completion
 
 ### Task 13: [Final] Update documentation
 
@@ -211,7 +211,7 @@ Data: doff=5  (20 bytes) — no options
 
 **Level 1:**
 ```
-SYN:  doff=10 (40 bytes) — MSS(1460) + SACK_PERM + TS(val,0) + NOP + wscale(7)
+SYN:  doff=11 (44 bytes) — MSS(1460) + SACK_PERM + TS(val,0) + NOP padding + wscale(7)
 Data: doff=8  (32 bytes) — NOP + NOP + TS(val,ecr)
 Overhead vs level 0: +12 bytes per data packet (~0.8% on 1460-byte payload)
 ```
