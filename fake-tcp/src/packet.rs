@@ -53,7 +53,7 @@ pub fn build_tcp_packet(
     let is_syn = (flags & tcp::TcpFlags::SYN) != 0;
     let tcp_options_len = if is_syn {
         if stealth >= StealthLevel::Basic {
-            20 // MSS(4) + SACK_PERM(2) + TS(10) + NOP(1) + wscale(3)
+            24 // MSS(4) + NOP(1)+NOP(1)+SACK_PERM(2) + NOP(1)+NOP(1)+TS(10) + NOP(1)+wscale(3)
         } else {
             4 // NOP(1) + wscale(3)
         }
@@ -108,7 +108,8 @@ pub fn build_tcp_packet(
     tcp.set_data_offset((tcp_header_len / 4) as u8);
     if is_syn {
         if stealth >= StealthLevel::Basic {
-            // Linux 5.x SYN fingerprint: MSS + SACK_PERM + Timestamps + NOP + wscale
+            // Linux 5.x SYN fingerprint with NOP padding for 4-byte alignment:
+            // MSS(4) + NOP+NOP+SACK_PERM(4) + NOP+NOP+TS(12) + NOP+WS(4) = 24 bytes
             let pkt = tcp.packet_mut();
             let opts = &mut pkt[TCP_HEADER_LEN..tcp_header_len];
             // MSS: kind=2, len=4, value=1460 (0x05B4)
@@ -116,20 +117,23 @@ pub fn build_tcp_packet(
             opts[1] = 4;
             opts[2] = 0x05;
             opts[3] = 0xB4;
-            // SACK permitted: kind=4, len=2
-            opts[4] = 4;
-            opts[5] = 2;
-            // Timestamps: kind=8, len=10, tsval, tsecr
-            opts[6] = 8;
-            opts[7] = 10;
-            opts[8..12].copy_from_slice(&ts_val.to_be_bytes());
-            opts[12..16].copy_from_slice(&ts_ecr.to_be_bytes());
-            // NOP: kind=1
-            opts[16] = 1;
-            // Window scale: kind=3, len=3, shift=7
-            opts[17] = 3;
-            opts[18] = 3;
-            opts[19] = 7;
+            // NOP + NOP + SACK permitted: kind=4, len=2
+            opts[4] = 1;
+            opts[5] = 1;
+            opts[6] = 4;
+            opts[7] = 2;
+            // NOP + NOP + Timestamps: kind=8, len=10, tsval, tsecr
+            opts[8] = 1;
+            opts[9] = 1;
+            opts[10] = 8;
+            opts[11] = 10;
+            opts[12..16].copy_from_slice(&ts_val.to_be_bytes());
+            opts[16..20].copy_from_slice(&ts_ecr.to_be_bytes());
+            // NOP + Window scale: kind=3, len=3, shift=7
+            opts[20] = 1;
+            opts[21] = 3;
+            opts[22] = 3;
+            opts[23] = 7;
         } else {
             let wscale = tcp::TcpOption::wscale(14);
             tcp.set_options(&[tcp::TcpOption::nop(), wscale]);
@@ -627,15 +631,15 @@ mod tests {
     #[test]
     fn test_stealth_syn_total_length_ipv4() {
         let pkt = ipv4_stealth_syn_packet();
-        // 20 (IPv4) + 40 (TCP: 20 base + 20 options) = 60
-        assert_eq!(pkt.len(), 60);
+        // 20 (IPv4) + 44 (TCP: 20 base + 24 options) = 64
+        assert_eq!(pkt.len(), 64);
     }
 
     #[test]
-    fn test_stealth_syn_doff_10() {
+    fn test_stealth_syn_doff_11() {
         let pkt = ipv4_stealth_syn_packet();
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_data_offset(), 10, "doff=10 means 40-byte TCP header");
+        assert_eq!(tcp_pkt.get_data_offset(), 11, "doff=11 means 44-byte TCP header");
     }
 
     #[test]
@@ -643,7 +647,7 @@ mod tests {
         let pkt = ipv4_stealth_syn_packet();
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
-        assert_eq!(opts.len(), 20);
+        assert_eq!(opts.len(), 24);
         // MSS: kind=2, len=4, value=1460 (0x05B4)
         assert_eq!(opts[0], 2, "MSS kind");
         assert_eq!(opts[1], 4, "MSS len");
@@ -655,9 +659,11 @@ mod tests {
         let pkt = ipv4_stealth_syn_packet();
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
-        // SACK permitted: kind=4, len=2
-        assert_eq!(opts[4], 4, "SACK_PERM kind");
-        assert_eq!(opts[5], 2, "SACK_PERM len");
+        // NOP + NOP + SACK permitted: kind=4, len=2
+        assert_eq!(opts[4], 1, "NOP before SACK_PERM");
+        assert_eq!(opts[5], 1, "NOP before SACK_PERM");
+        assert_eq!(opts[6], 4, "SACK_PERM kind");
+        assert_eq!(opts[7], 2, "SACK_PERM len");
     }
 
     #[test]
@@ -665,11 +671,13 @@ mod tests {
         let pkt = ipv4_stealth_syn_packet();
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
-        // Timestamps: kind=8, len=10
-        assert_eq!(opts[6], 8, "Timestamps kind");
-        assert_eq!(opts[7], 10, "Timestamps len");
+        // NOP + NOP + Timestamps: kind=8, len=10
+        assert_eq!(opts[8], 1, "NOP before TS");
+        assert_eq!(opts[9], 1, "NOP before TS");
+        assert_eq!(opts[10], 8, "Timestamps kind");
+        assert_eq!(opts[11], 10, "Timestamps len");
         // tsecr should be 0 for SYN
-        let ts_ecr = u32::from_be_bytes([opts[12], opts[13], opts[14], opts[15]]);
+        let ts_ecr = u32::from_be_bytes([opts[16], opts[17], opts[18], opts[19]]);
         assert_eq!(ts_ecr, 0, "ts_ecr=0 on initial SYN");
     }
 
@@ -678,12 +686,11 @@ mod tests {
         let pkt = ipv4_stealth_syn_packet();
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
-        // NOP at offset 16
-        assert_eq!(opts[16], 1, "NOP before wscale");
-        // wscale: kind=3, len=3, shift=7
-        assert_eq!(opts[17], 3, "wscale kind");
-        assert_eq!(opts[18], 3, "wscale len");
-        assert_eq!(opts[19], 7, "wscale shift=7");
+        // NOP + wscale: kind=3, len=3, shift=7
+        assert_eq!(opts[20], 1, "NOP before wscale");
+        assert_eq!(opts[21], 3, "wscale kind");
+        assert_eq!(opts[22], 3, "wscale len");
+        assert_eq!(opts[23], 7, "wscale shift=7");
     }
 
     #[test]
@@ -692,19 +699,19 @@ mod tests {
         let pkt = ipv4_stealth_syn_packet();
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
-        assert_eq!(opts.len(), 20);
-        // MSS(4) + SACK_PERM(2) + TS(10) + NOP(1) + wscale(3) = 20
+        assert_eq!(opts.len(), 24);
+        // MSS(4) + NOP+NOP+SACK_PERM(4) + NOP+NOP+TS(12) + NOP+wscale(4) = 24
         let expected_prefix = [
             2, 4, 0x05, 0xB4, // MSS = 1460
-            4, 2,             // SACK permitted
-            8, 10,            // Timestamps kind + len
+            1, 1, 4, 2,       // NOP + NOP + SACK permitted
+            1, 1, 8, 10,      // NOP + NOP + Timestamps kind + len
         ];
-        assert_eq!(&opts[0..8], &expected_prefix);
+        assert_eq!(&opts[0..12], &expected_prefix);
         let expected_suffix = [
             1,          // NOP
             3, 3, 7,    // wscale = 7
         ];
-        assert_eq!(&opts[16..20], &expected_suffix);
+        assert_eq!(&opts[20..24], &expected_suffix);
     }
 
     #[test]
@@ -719,21 +726,21 @@ mod tests {
             1000, 500,
             0xFFFF,
         );
-        assert_eq!(pkt.len(), 60, "SYN+ACK stealth: 20 IPv4 + 40 TCP");
+        assert_eq!(pkt.len(), 64, "SYN+ACK stealth: 20 IPv4 + 44 TCP");
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_data_offset(), 10);
+        assert_eq!(tcp_pkt.get_data_offset(), 11);
         let opts = tcp_pkt.get_options_raw();
-        assert_eq!(opts.len(), 20);
+        assert_eq!(opts.len(), 24);
         // MSS
         assert_eq!(opts[0], 2);
         assert_eq!(u16::from_be_bytes([opts[2], opts[3]]), 1460);
-        // SACK_PERM
-        assert_eq!(opts[4], 4);
-        // Timestamps
-        assert_eq!(opts[6], 8);
-        // wscale
-        assert_eq!(opts[17], 3);
-        assert_eq!(opts[19], 7);
+        // NOP + NOP + SACK_PERM
+        assert_eq!(opts[6], 4);
+        // NOP + NOP + Timestamps
+        assert_eq!(opts[10], 8);
+        // NOP + wscale
+        assert_eq!(opts[21], 3);
+        assert_eq!(opts[23], 7);
     }
 
     #[test]
@@ -754,12 +761,12 @@ mod tests {
         let local: SocketAddr = "[fd00::1]:1234".parse().unwrap();
         let remote: SocketAddr = "[fd00::2]:5678".parse().unwrap();
         let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Basic, 1000, 0, 0xFFFF);
-        // 40 (IPv6) + 40 (TCP: 20 base + 20 options) = 80
-        assert_eq!(pkt.len(), 80);
+        // 40 (IPv6) + 44 (TCP: 20 base + 24 options) = 84
+        assert_eq!(pkt.len(), 84);
         let v6 = ipv6::Ipv6Packet::new(&pkt).unwrap();
-        assert_eq!(v6.get_payload_length() as usize, 40);
+        assert_eq!(v6.get_payload_length() as usize, 44);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[40..]).unwrap();
-        assert_eq!(tcp_pkt.get_data_offset(), 10);
+        assert_eq!(tcp_pkt.get_data_offset(), 11);
     }
 
     #[test]
@@ -802,12 +809,12 @@ mod tests {
             let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
             let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
             let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, stealth, 1000, 0, 0xFFFF);
-            assert_eq!(pkt.len(), 60, "stealth {:?} SYN should be 60 bytes", stealth);
+            assert_eq!(pkt.len(), 64, "stealth {:?} SYN should be 64 bytes", stealth);
             let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-            assert_eq!(tcp_pkt.get_data_offset(), 10);
+            assert_eq!(tcp_pkt.get_data_offset(), 11);
             let opts = tcp_pkt.get_options_raw();
             assert_eq!(opts[0], 2); // MSS
-            assert_eq!(opts[19], 7); // wscale=7
+            assert_eq!(opts[23], 7); // wscale=7
         }
     }
 
@@ -855,9 +862,10 @@ mod tests {
         let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Basic, ts_val, 0, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
-        // SYN timestamps at opts[8..12] (tsval) and opts[12..16] (tsecr)
-        let parsed_tsval = u32::from_be_bytes([opts[8], opts[9], opts[10], opts[11]]);
-        let parsed_tsecr = u32::from_be_bytes([opts[12], opts[13], opts[14], opts[15]]);
+        // SYN timestamps at opts[12..16] (tsval) and opts[16..20] (tsecr)
+        // (after MSS(4) + NOP+NOP+SACK(4) + NOP+NOP+TS_kind+TS_len(4))
+        let parsed_tsval = u32::from_be_bytes([opts[12], opts[13], opts[14], opts[15]]);
+        let parsed_tsecr = u32::from_be_bytes([opts[16], opts[17], opts[18], opts[19]]);
         assert_eq!(parsed_tsval, ts_val, "SYN tsval should be filled in");
         assert_eq!(parsed_tsecr, 0, "SYN tsecr should be 0 for initial SYN");
     }
@@ -872,8 +880,8 @@ mod tests {
         let pkt = build_tcp_packet(local, remote, 0, 1, tcp::TcpFlags::SYN | tcp::TcpFlags::ACK, None, StealthLevel::Basic, ts_val, ts_ecr, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
-        let parsed_tsval = u32::from_be_bytes([opts[8], opts[9], opts[10], opts[11]]);
-        let parsed_tsecr = u32::from_be_bytes([opts[12], opts[13], opts[14], opts[15]]);
+        let parsed_tsval = u32::from_be_bytes([opts[12], opts[13], opts[14], opts[15]]);
+        let parsed_tsecr = u32::from_be_bytes([opts[16], opts[17], opts[18], opts[19]]);
         assert_eq!(parsed_tsval, ts_val);
         assert_eq!(parsed_tsecr, ts_ecr, "SYN+ACK should echo peer's tsval");
     }

@@ -362,14 +362,18 @@ impl Socket {
                             // Congestion window growth on new ACK
                             let cwnd = self.cwnd.load(Ordering::Relaxed);
                             let ssthresh = self.ssthresh.load(Ordering::Relaxed);
-                            if cwnd < ssthresh {
-                                // Slow start: increase cwnd by MSS (doubles per RTT)
-                                self.cwnd.store(cwnd + 1460, Ordering::Relaxed);
-                            } else {
-                                // Congestion avoidance: increase cwnd by MSS per RTT
-                                // Approximate: add MSS^2/cwnd per ACK
-                                let increment = (1460u32 * 1460).checked_div(cwnd).unwrap_or(1);
-                                self.cwnd.store(cwnd + increment.max(1), Ordering::Relaxed);
+                            // Cap cwnd at 1MB to keep congestion simulation meaningful
+                            const MAX_CWND: u32 = 1_048_576;
+                            if cwnd < MAX_CWND {
+                                if cwnd < ssthresh {
+                                    // Slow start: increase cwnd by MSS (doubles per RTT)
+                                    self.cwnd.store((cwnd + 1460).min(MAX_CWND), Ordering::Relaxed);
+                                } else {
+                                    // Congestion avoidance: increase cwnd by MSS per RTT
+                                    // Approximate: add MSS^2/cwnd per ACK
+                                    let increment = (1460u32 * 1460).checked_div(cwnd).unwrap_or(1);
+                                    self.cwnd.store((cwnd + increment.max(1)).min(MAX_CWND), Ordering::Relaxed);
+                                }
                             }
                         }
 
@@ -445,6 +449,9 @@ impl Socket {
                         {
                             // found our ACK
                             self.seq.fetch_add(1, Ordering::Relaxed);
+                            // Update last_acked_seq so Level 3 bytes_in_flight starts at 0
+                            let new_seq = self.seq.load(Ordering::Relaxed);
+                            self.last_acked_seq.store(new_seq, Ordering::Relaxed);
                             self.state = State::Established;
 
                             info!("Connection from {:?} established", self.remote_addr);
@@ -498,6 +505,9 @@ impl Socket {
                                 self.seq.fetch_add(1, Ordering::Relaxed);
                                 self.ack
                                     .store(tcp_packet.get_sequence() + 1, Ordering::Relaxed);
+                                // Update last_acked_seq so Level 3 bytes_in_flight starts at 0
+                                let new_seq = self.seq.load(Ordering::Relaxed);
+                                self.last_acked_seq.store(new_seq, Ordering::Relaxed);
 
                                 // send ACK to finish handshake
                                 let buf = self.build_tcp_packet(tcp::TcpFlags::ACK, None);
@@ -532,6 +542,8 @@ impl Drop for Socket {
         // purge cache
         self.shared.tuples_purge.send(tuple).unwrap();
 
+        // Send RST with StealthLevel::Off to avoid timestamps on RST packets,
+        // which would be a distinguishing fingerprint (real Linux omits them)
         let buf = build_tcp_packet(
             self.local_addr,
             self.remote_addr,
@@ -539,10 +551,10 @@ impl Drop for Socket {
             0,
             tcp::TcpFlags::RST,
             None,
-            self.stealth,
-            self.current_ts_val(),
-            0, // RST doesn't need ts_ecr
-            self.current_window(),
+            StealthLevel::Off,
+            0,
+            0,
+            0xFFFF, // Standard RST window
         );
         if let Err(e) = self.tun.try_send(&buf) {
             warn!("Unable to send RST to remote end: {}", e);
