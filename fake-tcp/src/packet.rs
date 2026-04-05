@@ -92,17 +92,13 @@ pub fn build_tcp_packet(
             v4.set_source(*local.ip());
             v4.set_destination(*remote.ip());
             v4.set_total_length(total_len.try_into().unwrap());
-            // When mimic has incrementing IP ID active, use the counter value and no DF
-            // (matches udp2raw behavior). Otherwise use default: ID=0, DF=1.
+            // DF is always set (both default phantun and udp2raw behavior).
+            // When mimic has incrementing IP ID, also set the identification field.
+            v4.set_flags(ipv4::Ipv4Flags::DontFragment);
             if let Some(mp) = mimic {
                 if mp.ip_id_incrementing {
                     v4.set_identification(mp.ip_id);
-                    // No DF flag — udp2raw does not set DF
-                } else {
-                    v4.set_flags(ipv4::Ipv4Flags::DontFragment);
                 }
-            } else {
-                v4.set_flags(ipv4::Ipv4Flags::DontFragment);
             }
             let mut cksm = Checksum::new();
             cksm.add_bytes(v4.packet());
@@ -1607,9 +1603,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ipv4_mimic_ip_id_zero_with_incrementing_clears_df() {
-        // Regression: when ip_id counter wraps to 0, DF should still be cleared
-        // because ip_id_incrementing is true (the counter just happened to wrap)
+    fn test_ipv4_mimic_ip_id_zero_with_incrementing_keeps_df() {
+        // When ip_id counter wraps to 0, DF should still be set (udp2raw always sets DF)
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let mp = MimicParams { ip_id: 0, ip_id_incrementing: true, wscale: None };
@@ -1619,12 +1614,12 @@ mod tests {
         );
         let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
         assert_eq!(v4.get_identification(), 0, "ip_id=0 should still set ID=0");
-        assert_ne!(v4.get_flags(), ipv4::Ipv4Flags::DontFragment,
-            "ip_id_incrementing=true should clear DF even when ip_id wraps to 0");
+        assert_eq!(v4.get_flags(), ipv4::Ipv4Flags::DontFragment,
+            "DF should always be set (matches udp2raw)");
     }
 
     #[test]
-    fn test_ipv4_mimic_ip_id_nonzero_sets_id_clears_df() {
+    fn test_ipv4_mimic_ip_id_nonzero_sets_id_keeps_df() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let mp = MimicParams { ip_id: 42, ip_id_incrementing: true, wscale: None };
@@ -1634,7 +1629,7 @@ mod tests {
         );
         let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
         assert_eq!(v4.get_identification(), 42, "ip_id=42 should set ID=42");
-        assert_ne!(v4.get_flags(), ipv4::Ipv4Flags::DontFragment, "non-zero ip_id should clear DF");
+        assert_eq!(v4.get_flags(), ipv4::Ipv4Flags::DontFragment, "DF should always be set (matches udp2raw)");
     }
 
     #[test]

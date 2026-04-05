@@ -337,8 +337,8 @@ impl Socket {
         if let Some(ref m) = self.mimic
             && m.window_raw > 0
         {
-            // Mimic mode: return static window_raw (no jitter), matching udp2raw
-            return self.window_base;
+            // Mimic mode: window_raw with small jitter (0..512), matching udp2raw range ~41000-41466
+            return self.window_base.wrapping_add(rand::random::<u16>() % 512);
         }
         if self.stealth >= StealthLevel::Standard {
             // Add jitter of 0..32 to base window to simulate natural variation
@@ -3042,9 +3042,10 @@ mod tests {
         // window_base should be mimic.window_raw
         assert_eq!(socket.window_base, 41000, "window_base should be mimic's window_raw");
 
-        // current_window() should return exactly window_base (static, no jitter)
+        // current_window() should return window_base with small jitter (0..512)
         for _ in 0..50 {
-            assert_eq!(socket.current_window(), 41000, "current_window should be static 41000 in mimic mode");
+            let w = socket.current_window();
+            assert!(w >= 41000 && w < 41512, "current_window {w} should be in range 41000..41512 in mimic mode");
         }
     }
 }
