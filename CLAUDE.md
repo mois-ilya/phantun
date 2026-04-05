@@ -18,6 +18,16 @@ cargo clippy --verbose          # lint (CI runs this)
 - `2` — dynamic window, frequent ACK, correct ts_ecr echo
 - `3` — dup ACK tracking, send window constraint, congestion simulation (may throttle throughput)
 
+## Mimic Mode
+
+`--mimic <PROFILE>` replicates another tool's TCP fingerprint for DPI debugging. Currently supported: `udp2raw`.
+
+- Orthogonal to `--stealth` — mimic overrides specific packet params, forces stealth >= Standard
+- Toggle flags to disable individual features: `--mimic-no-ipid`, `--mimic-no-wscale`, `--mimic-no-psh`, `--mimic-no-window`
+- `MimicProfile` (immutable config) in lib.rs, `MimicParams` (per-packet overrides) in packet.rs
+- Per-socket state: `ip_id_counter: Option<AtomicU16>` for incrementing IPv4 IP ID
+- Debugging workflow: enable full mimic, verify bypass, disable features one-by-one to isolate DPI trigger
+
 ## Testing
 
 ```bash

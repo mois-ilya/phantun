@@ -142,9 +142,9 @@
 
 ### Task 7: [Final] Update documentation
 
-- [ ] Update CLAUDE.md with mimic mode description and flag reference
-- [ ] Update README.md usage section with `--mimic udp2raw` examples and debugging workflow
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update CLAUDE.md with mimic mode description and flag reference
+- [x] Update README.md usage section with `--mimic udp2raw` examples and debugging workflow
+- [x] Move this plan to `docs/plans/completed/`
 
 ## Technical Details
 

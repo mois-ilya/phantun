@@ -28,6 +28,11 @@ A lightweight and fast UDP to TCP obfuscator.
     * [Usage](#usage-1)
     * [Performance impact](#performance-impact)
     * [MTU with stealth mode](#mtu-with-stealth-mode)
+* [Mimic mode](#mimic-mode)
+    * [Usage](#usage-2)
+    * [What mimic udp2raw changes](#what-mimic-udp2raw-changes)
+    * [Toggle flags](#toggle-flags)
+    * [Debugging workflow](#debugging-workflow)
 * [MTU overhead](#mtu-overhead)
     * [MTU calculation for WireGuard](#mtu-calculation-for-wireguard)
 * [Version compatibility](#version-compatibility)
@@ -302,6 +307,55 @@ Level 1-2 are recommended for most use cases. Level 3 provides the most realisti
 ## MTU with stealth mode
 
 When stealth level >= 1, TCP timestamps add 12 bytes to data packets (TCP header grows from 20 to 32 bytes). Adjust your MTU calculations accordingly. See [MTU overhead](#mtu-overhead) for details.
+
+[Back to TOC](#table-of-contents)
+
+# Mimic mode
+
+Phantun supports a `--mimic` flag that replicates the TCP fingerprint of another tool. This is useful for debugging DPI systems — by matching a known-working tool's fingerprint and then selectively disabling features, you can isolate exactly which TCP characteristic triggers blocking.
+
+Currently supported profiles: `udp2raw`
+
+## Usage
+
+```
+# Server mimicking udp2raw's TCP fingerprint
+RUST_LOG=info phantun_server --local 4567 --remote 127.0.0.1:1234 --mimic udp2raw
+
+# Client mimicking udp2raw's TCP fingerprint
+RUST_LOG=info phantun_client --local 127.0.0.1:1234 --remote 10.0.0.1:4567 --mimic udp2raw
+```
+
+Both client and server should use the same `--mimic` setting. Mimic mode forces stealth to at least Standard level (level 2).
+
+## What mimic udp2raw changes
+
+| Feature | phantun default (stealth 2) | `--mimic udp2raw` |
+|---------|---------------------------|-------------------|
+| IP ID (IPv4) | 0 with DF flag | Incrementing counter, no DF |
+| Window Scale | 7 | 5 |
+| TCP Window | 256-512 (with jitter) | 41000 (static) |
+| PSH flag on data | Always set | Not set |
+
+## Toggle flags
+
+Each mimic feature can be individually disabled for A/B testing:
+
+| Flag | Effect |
+|------|--------|
+| `--mimic-no-ipid` | Use phantun's default IP ID (0 + DF) |
+| `--mimic-no-wscale` | Use phantun's default wscale (7) |
+| `--mimic-no-psh` | Use phantun's default PSH behavior |
+| `--mimic-no-window` | Use phantun's default window sizing |
+
+## Debugging workflow
+
+1. `--mimic udp2raw` — verify DPI bypass works (baseline, should match udp2raw)
+2. `--mimic udp2raw --mimic-no-ipid` — if bypass still works, IP ID is not the trigger
+3. `--mimic udp2raw --mimic-no-wscale` — if bypass still works, wscale is not the trigger
+4. `--mimic udp2raw --mimic-no-psh` — if bypass still works, PSH is not the trigger
+5. `--mimic udp2raw --mimic-no-window` — if bypass still works, window size is not the trigger
+6. Combine multiple `--mimic-no-*` flags to narrow down further
 
 [Back to TOC](#table-of-contents)
 
