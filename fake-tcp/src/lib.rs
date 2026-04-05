@@ -146,6 +146,10 @@ struct Shared {
     tuples_purge: broadcast::Sender<AddrTuple>,
     stealth: StealthLevel,
     mimic: Option<MimicProfile>,
+    /// Stack-level incrementing IP ID counter for RSTs sent without a Socket
+    /// (e.g., bad SYN responses, unknown-packet RSTs after socket drop).
+    /// Some when mimic.ip_id_incrementing=true, initialized with random start.
+    stack_ip_id_counter: Option<AtomicU16>,
 }
 
 pub struct Stack {
@@ -826,19 +830,31 @@ impl Drop for Socket {
     /// Drop the socket and close the TCP connection
     fn drop(&mut self) {
         let tuple = AddrTuple::new(self.local_addr, self.remote_addr);
-        // dissociates ourself from the dispatch map
-        if let Ok(mut tuples) = self.shared.tuples.write() {
-            if tuples.remove(&tuple).is_none() {
-                warn!("Socket drop: tuple {:?} already removed from dispatch map", tuple);
-            }
-        } else {
-            warn!("Socket drop: tuples lock poisoned, cannot remove {:?}", tuple);
-        }
-        // purge cache (ignore error if no receivers exist, e.g. during shutdown)
-        let _ = self.shared.tuples_purge.send(tuple);
 
-        // Send RST with StealthLevel::Off to avoid timestamps on RST packets,
-        // which would be a distinguishing fingerprint (real Linux omits them)
+        // Send RST *before* removing the tuple from the dispatch map.
+        // This avoids a teardown race: if we removed the tuple first,
+        // a retransmission arriving in the window before our RST would
+        // miss the socket lookup and be answered by the stack-level
+        // "unknown packet" RST path, which uses a different IP-ID counter
+        // — an observable fingerprint discontinuity in mimic mode.
+        // By sending the RST while the tuple is still registered, any
+        // retransmit during this window is dispatched to our channel
+        // (silently dropped since we are tearing down) instead.
+        //
+        // StealthLevel::Off avoids timestamps on RST packets (real Linux
+        // omits them). The socket's own IP ID counter keeps mimic
+        // IP-header params (incrementing ID, DF cleared) correct.
+        let mimic_params = self.mimic.as_ref().map(|profile| {
+            MimicParams {
+                ip_id: self
+                    .ip_id_counter
+                    .as_ref()
+                    .map(|c| c.fetch_add(1, Ordering::Relaxed))
+                    .unwrap_or(0),
+                ip_id_incrementing: profile.ip_id_incrementing,
+                wscale: None,
+            }
+        });
         let buf = build_tcp_packet(
             self.local_addr,
             self.remote_addr,
@@ -850,11 +866,22 @@ impl Drop for Socket {
             0,
             0,
             0, // Real Linux sends RST with window=0
-            None,
+            mimic_params.as_ref(),
         );
         if let Err(e) = self.tun.try_send(&buf) {
             warn!("Unable to send RST to remote end: {}", e);
         }
+
+        // Now dissociate from the dispatch map
+        if let Ok(mut tuples) = self.shared.tuples.write() {
+            if tuples.remove(&tuple).is_none() {
+                warn!("Socket drop: tuple {:?} already removed from dispatch map", tuple);
+            }
+        } else {
+            warn!("Socket drop: tuples lock poisoned, cannot remove {:?}", tuple);
+        }
+        // purge cache (ignore error if no receivers exist, e.g. during shutdown)
+        let _ = self.shared.tuples_purge.send(tuple);
 
         info!("Fake TCP connection to {} closed", self);
     }
@@ -896,6 +923,10 @@ impl Stack {
         let (ready_tx, ready_rx) = mpsc::channel(MPSC_BUFFER_LEN);
         let (tuples_purge_tx, _tuples_purge_rx) = broadcast::channel(16);
         let cancel = CancellationToken::new();
+        let stack_ip_id_counter = mimic
+            .as_ref()
+            .filter(|m| m.ip_id_incrementing)
+            .map(|_| AtomicU16::new(rand::random::<u16>()));
         let shared = Arc::new(Shared {
             tuples: RwLock::new(HashMap::new()),
             tun: tun.clone(),
@@ -904,6 +935,7 @@ impl Stack {
             tuples_purge: tuples_purge_tx.clone(),
             stealth,
             mimic,
+            stack_ip_id_counter,
         });
 
         let mut reader_handles = Vec::with_capacity(tun.len());
@@ -1106,6 +1138,17 @@ impl Stack {
                                     tokio::spawn(sock.accept(cancel.clone()));
                                 } else {
                                     trace!("Bad TCP SYN packet from {}, sending RST", remote_addr);
+                                    let stack_mimic = shared.mimic.as_ref().map(|profile| {
+                                        MimicParams {
+                                            ip_id: shared
+                                                .stack_ip_id_counter
+                                                .as_ref()
+                                                .map(|c| c.fetch_add(1, Ordering::Relaxed))
+                                                .unwrap_or(0),
+                                            ip_id_incrementing: profile.ip_id_incrementing,
+                                            wscale: None,
+                                        }
+                                    });
                                     let buf = build_tcp_packet(
                                         local_addr,
                                         remote_addr,
@@ -1116,7 +1159,7 @@ impl Stack {
                                         StealthLevel::Off,
                                         0, 0,
                                         0xFFFF,
-                                        None,
+                                        stack_mimic.as_ref(),
                                     );
                                     if let Err(e) = shared.tun[0].try_send(&buf) {
                                         warn!("reader_task: failed to send RST for bad SYN: {}", e);
@@ -1145,6 +1188,17 @@ impl Stack {
                                      0xFFFF)
                                 };
 
+                                let stack_mimic = shared.mimic.as_ref().map(|profile| {
+                                    MimicParams {
+                                        ip_id: shared
+                                            .stack_ip_id_counter
+                                            .as_ref()
+                                            .map(|c| c.fetch_add(1, Ordering::Relaxed))
+                                            .unwrap_or(0),
+                                        ip_id_incrementing: profile.ip_id_incrementing,
+                                        wscale: None,
+                                    }
+                                });
                                 let buf = build_tcp_packet(
                                     local_addr,
                                     remote_addr,
@@ -1155,7 +1209,7 @@ impl Stack {
                                     StealthLevel::Off,
                                     0, 0,
                                     rst_window,
-                                    None,
+                                    stack_mimic.as_ref(),
                                 );
                                 if let Err(e) = shared.tun[0].try_send(&buf) {
                                     warn!("reader_task: failed to send RST for unknown packet: {}", e);
@@ -2212,6 +2266,7 @@ mod tests {
             tuples_purge: tuples_purge_tx,
             stealth: StealthLevel::Off,
             mimic: None,
+            stack_ip_id_counter: None,
         });
 
         let local_addr: SocketAddr = "10.200.0.1:1234".parse().unwrap();
@@ -2284,6 +2339,7 @@ mod tests {
             tuples_purge: tuples_purge_tx,
             stealth: StealthLevel::Off,
             mimic: None,
+            stack_ip_id_counter: None,
         });
 
         // Test connect: should exhaust retries without panicking
@@ -2415,6 +2471,7 @@ mod tests {
             tuples_purge: tuples_purge_tx,
             stealth: StealthLevel::Full,
             mimic: None,
+            stack_ip_id_counter: None,
         });
 
         let local_addr: SocketAddr = "10.210.0.1:1234".parse().unwrap();
@@ -2570,6 +2627,7 @@ mod tests {
             tuples_purge: tuples_purge_tx,
             stealth: StealthLevel::Full,
             mimic: None,
+            stack_ip_id_counter: None,
         });
 
         let local_addr: SocketAddr = "10.220.0.1:1234".parse().unwrap();
@@ -2758,6 +2816,7 @@ mod tests {
             tuples_purge: tuples_purge_tx,
             stealth: StealthLevel::Off, // mimic should force to Standard
             mimic: Some(MimicProfile::udp2raw()),
+            stack_ip_id_counter: Some(AtomicU16::new(rand::random::<u16>())),
         });
 
         let local_addr: SocketAddr = "10.230.0.1:1234".parse().unwrap();
@@ -2960,6 +3019,7 @@ mod tests {
             tuples_purge: tuples_purge_tx,
             stealth: StealthLevel::Off,
             mimic: Some(MimicProfile::udp2raw()),
+            stack_ip_id_counter: Some(AtomicU16::new(rand::random::<u16>())),
         });
 
         let local_addr: SocketAddr = "10.231.0.1:1234".parse().unwrap();
