@@ -38,9 +38,11 @@
 //! and [`server.rs`](https://github.com/dndx/phantun/blob/main/phantun/src/bin/server.rs) files
 //! from the `phantun` crate for how to use this library in client/server mode, respectively.
 
-#![cfg_attr(feature = "benchmark", feature(test))]
 
 pub mod packet;
+
+#[cfg(feature = "integration-tests")]
+pub mod testing;
 
 use bytes::{Bytes, BytesMut};
 use log::{error, info, trace, warn};
@@ -57,8 +59,10 @@ use std::sync::{
 use std::time::Instant;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time;
 use tokio_tun::Tun;
+use tokio_util::sync::CancellationToken;
 
 /// Stealth level controlling TCP fingerprint realism.
 ///
@@ -119,6 +123,8 @@ pub struct Stack {
     local_ip: Ipv4Addr,
     local_ip6: Option<Ipv6Addr>,
     ready: mpsc::Receiver<Socket>,
+    cancel: CancellationToken,
+    reader_handles: Vec<JoinHandle<()>>,
 }
 
 pub enum State {
@@ -240,6 +246,14 @@ impl Socket {
             },
             incoming_tx,
         )
+    }
+
+    /// Returns an opaque identifier for the TUN queue this socket is bound to.
+    /// Two sockets on the same queue return the same value. Useful for verifying
+    /// that benchmark connections cover all queues.
+    #[cfg(feature = "integration-tests")]
+    pub fn tun_queue_id(&self) -> usize {
+        Arc::as_ptr(&self.tun) as usize
     }
 
     /// Compute the current ts_val from elapsed time + random offset
@@ -490,8 +504,12 @@ impl Socket {
         }
     }
 
-    async fn accept(mut self) {
+    async fn accept(mut self, cancel: CancellationToken) {
         for _ in 0..RETRIES {
+            if cancel.is_cancelled() {
+                trace!("Accept cancelled during handshake, aborting");
+                return;
+            }
             match self.state {
                 State::Idle => {
                     let buf = self.build_tcp_packet(tcp::TcpFlags::SYN | tcp::TcpFlags::ACK, None);
@@ -501,7 +519,13 @@ impl Socket {
                     info!("Sent SYN + ACK to client");
                 }
                 State::SynReceived => {
-                    let res = time::timeout(TIMEOUT, self.incoming.recv_async()).await;
+                    let res = tokio::select! {
+                        _ = cancel.cancelled() => {
+                            trace!("Accept cancelled while waiting for ACK");
+                            return;
+                        }
+                        res = time::timeout(TIMEOUT, self.incoming.recv_async()) => res,
+                    };
                     if let Ok(buf) = res {
                         let buf = buf.unwrap();
                         let (_v4_packet, tcp_packet) = parse_ip_packet(&buf).unwrap();
@@ -532,8 +556,16 @@ impl Socket {
 
                             info!("Connection from {:?} established", self.remote_addr);
                             let ready = self.shared.ready.clone();
-                            if let Err(e) = ready.send(self).await {
-                                error!("Unable to send accepted socket to ready queue: {}", e);
+                            tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => {
+                                    trace!("Accept cancelled while sending to ready queue");
+                                }
+                                res = ready.send(self) => {
+                                    if let Err(e) = res {
+                                        error!("Unable to send accepted socket to ready queue: {}", e);
+                                    }
+                                }
                             }
                             return;
                         }
@@ -618,7 +650,10 @@ impl Drop for Socket {
         // dissociates ourself from the dispatch map
         assert!(self.shared.tuples.write().unwrap().remove(&tuple).is_some());
         // purge cache
-        self.shared.tuples_purge.send(tuple).unwrap();
+        // Ignore error: after Stack::shutdown(), reader tasks (the only
+        // broadcast subscribers) are gone, so send() returns Err — that's fine
+        // because there is no local cache left to purge.
+        let _ = self.shared.tuples_purge.send(tuple);
 
         // Send RST with StealthLevel::Off to avoid timestamps on RST packets,
         // which would be a distinguishing fingerprint (real Linux omits them)
@@ -653,6 +688,14 @@ impl fmt::Display for Socket {
     }
 }
 
+impl Drop for Stack {
+    fn drop(&mut self) {
+        // Note: reader tasks are signalled but not joined (Drop is sync).
+        // Call shutdown() for clean teardown that awaits task completion.
+        self.cancel.cancel();
+    }
+}
+
 /// A userspace TCP state machine
 impl Stack {
     /// Create a new stack, `tun` is an array of [`Tun`](tokio_tun::Tun).
@@ -668,6 +711,7 @@ impl Stack {
         let tun: Vec<Arc<Tun>> = tun.into_iter().map(Arc::new).collect();
         let (ready_tx, ready_rx) = mpsc::channel(MPSC_BUFFER_LEN);
         let (tuples_purge_tx, _tuples_purge_rx) = broadcast::channel(16);
+        let cancel = CancellationToken::new();
         let shared = Arc::new(Shared {
             tuples: RwLock::new(HashMap::new()),
             tun: tun.clone(),
@@ -677,12 +721,15 @@ impl Stack {
             stealth,
         });
 
+        let mut reader_handles = Vec::with_capacity(tun.len());
         for t in tun {
-            tokio::spawn(Stack::reader_task(
+            let handle = tokio::spawn(Stack::reader_task(
                 t,
                 shared.clone(),
                 tuples_purge_tx.subscribe(),
+                cancel.clone(),
             ));
+            reader_handles.push(handle);
         }
 
         Stack {
@@ -690,6 +737,20 @@ impl Stack {
             local_ip,
             local_ip6,
             ready: ready_rx,
+            cancel,
+            reader_handles,
+        }
+    }
+
+    /// Shuts down the stack by cancelling all reader tasks and waiting for them to finish.
+    ///
+    /// This releases TUN file descriptors and stops background tasks, preventing
+    /// resource leaks when a `Stack` is no longer needed. Can be called multiple
+    /// times safely; subsequent calls are no-ops.
+    pub async fn shutdown(&mut self) {
+        self.cancel.cancel();
+        for handle in self.reader_handles.drain(..) {
+            let _ = handle.await;
         }
     }
 
@@ -757,6 +818,7 @@ impl Stack {
         tun: Arc<Tun>,
         shared: Arc<Shared>,
         mut tuples_purge: broadcast::Receiver<AddrTuple>,
+        cancel: CancellationToken,
     ) {
         let mut tuples: HashMap<AddrTuple, flume::Sender<Bytes>> = HashMap::new();
 
@@ -764,6 +826,10 @@ impl Stack {
             let mut buf = BytesMut::zeroed(MAX_PACKET_LEN);
 
             tokio::select! {
+                _ = cancel.cancelled() => {
+                    trace!("Reader task cancelled, shutting down");
+                    return;
+                }
                 size = tun.recv(&mut buf) => {
                     let size = size.unwrap();
                     buf.truncate(size);
@@ -777,15 +843,22 @@ impl Stack {
 
                             let tuple = AddrTuple::new(local_addr, remote_addr);
                             if let Some(c) = tuples.get(&tuple) {
-                                if c.send_async(buf).await.is_err() {
-                                    trace!("Cache hit, but receiver already closed, dropping packet");
+                                tokio::select! {
+                                    _ = cancel.cancelled() => { return; }
+                                    // clone is cheap (Bytes refcount bump); buf may be needed if cache entry is stale
+                    result = c.send_async(buf.clone()) => {
+                                        if result.is_err() {
+                                            trace!("Cache hit, but receiver closed — removing stale entry");
+                                            tuples.remove(&tuple);
+                                        } else {
+                                            continue;
+                                        }
+                                    }
                                 }
+                                // Stale cache entry removed — fall through to shared map lookup
+                            }
 
-                                continue;
-
-                                // If not Ok, receiver has been closed and just fall through to the slow
-                                // path below
-                            } else {
+                            {
                                 trace!("Cache miss, checking the shared tuples table for connection");
                                 let sender = {
                                     let tuples = shared.tuples.read().unwrap();
@@ -795,7 +868,14 @@ impl Stack {
                                 if let Some(c) = sender {
                                     trace!("Storing connection information into local tuples");
                                     tuples.insert(tuple, c.clone());
-                                    c.send_async(buf).await.unwrap();
+                                    tokio::select! {
+                                        _ = cancel.cancelled() => { return; }
+                                        result = c.send_async(buf) => {
+                                            if result.is_err() {
+                                                trace!("Tuple found in shared map, but receiver closed, dropping packet");
+                                            }
+                                        }
+                                    }
                                     continue;
                                 }
                             }
@@ -830,7 +910,7 @@ impl Stack {
                                         .unwrap()
                                         .insert(tuple, incoming)
                                         .is_none());
-                                    tokio::spawn(sock.accept());
+                                    tokio::spawn(sock.accept(cancel.clone()));
                                 } else {
                                     trace!("Bad TCP SYN packet from {}, sending RST", remote_addr);
                                     let buf = build_tcp_packet(
@@ -889,9 +969,19 @@ impl Stack {
                     }
                 },
                 tuple = tuples_purge.recv() => {
-                    let tuple = tuple.unwrap();
-                    tuples.remove(&tuple);
-                    trace!("Removed cached tuple: {:?}", tuple);
+                    match tuple {
+                        Ok(tuple) => {
+                            tuples.remove(&tuple);
+                            trace!("Removed cached tuple: {:?}", tuple);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("tuples_purge receiver lagged by {} messages, clearing local cache", n);
+                            tuples.clear();
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            break;
+                        }
+                    }
                 }
             }
         }
