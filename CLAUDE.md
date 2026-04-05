@@ -52,7 +52,7 @@ git config core.hooksPath .githooks
 
 ## Code Conventions
 
-- Hot path (send/recv): `AtomicU32` with `Ordering::Relaxed`, no locks, no allocations
+- Hot path (send/recv): `AtomicU32` with `Ordering::Relaxed` for levels 0-2; Level 3 uses `Mutex<CongestionState>` for grouped congestion state updates (cwnd, ssthresh, dup_ack_count, etc.)
 - `build_tcp_packet()` is pure — stealth state passed via `TcpBuildOptions`, not read from Socket
 - Each stealth level includes all lower levels (`StealthLevel` implements `PartialOrd`)
 - Async runtime: Tokio with `features = ["full"]`
@@ -66,7 +66,8 @@ git config core.hooksPath .githooks
 
 - `--stealth 0` must remain byte-identical to pre-stealth output (backward compatibility invariant)
 - Level 3 congestion simulation intentionally throttles throughput for realism
-- `parse_ip_packet` in `packet.rs` panics on malformed/short buffers — known issue, see `#[should_panic]` tests
+- Integration tests require DNAT iptables rules to route TCP to TUN peer address
+- `parse_ip_packet` returns `None` on malformed/short buffers; callers log a warning and continue
 - Binaries require `CAP_NET_ADMIN` or root for TUN device creation
 - Cross-compilation uses `cross` tool; MIPS targets require nightly toolchain
 - Integration test helpers live in `fake-tcp/src/testing.rs` (not `tests/common/mod.rs`, which is a thin re-export)
