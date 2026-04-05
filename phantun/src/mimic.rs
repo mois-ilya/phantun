@@ -8,6 +8,7 @@ pub fn add_mimic_args(cmd: Command) -> Command {
             .long("mimic")
             .required(false)
             .value_name("PROFILE")
+            .value_parser(["udp2raw"])
             .help(
                 "Mimic a specific TCP fingerprint profile. Currently supported: \"udp2raw\". \
                  When active, forces stealth to at least Standard level.",
@@ -56,7 +57,8 @@ pub fn build_mimic_profile(matches: &ArgMatches) -> Option<MimicProfile> {
 
     let mut profile = match profile_name.as_str() {
         "udp2raw" => MimicProfile::udp2raw(),
-        other => panic!("unknown mimic profile: {other}"),
+        // SAFETY: clap's value_parser restricts to known profiles
+        other => unreachable!("unknown mimic profile: {other}"),
     };
 
     if matches.get_flag("mimic_no_ipid") {
@@ -239,9 +241,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unknown mimic profile")]
-    fn test_unknown_mimic_profile() {
-        let matches = test_command()
+    fn test_unknown_mimic_profile_rejected_by_clap() {
+        let result = test_command()
             .try_get_matches_from([
                 "test",
                 "-l",
@@ -250,8 +251,7 @@ mod tests {
                 "10.0.0.1:5678",
                 "--mimic",
                 "nonexistent",
-            ])
-            .unwrap();
-        build_mimic_profile(&matches);
+            ]);
+        assert!(result.is_err());
     }
 }

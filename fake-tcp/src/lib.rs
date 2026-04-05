@@ -1092,7 +1092,7 @@ impl Stack {
                                         shared.mimic.clone(),
                                     );
                                     // Echo client's SYN tsval in SYN+ACK ts_ecr (RFC 7323)
-                                    if shared.stealth >= StealthLevel::Basic
+                                    if (shared.stealth >= StealthLevel::Basic || shared.mimic.is_some())
                                         && let Some((peer_tsval, _)) = parse_tcp_timestamps(&tcp_packet)
                                     {
                                         sock.ts_ecr.store(peer_tsval, Ordering::Relaxed);
@@ -1127,7 +1127,7 @@ impl Stack {
                                 let flags = tcp_packet.get_flags();
                                 let has_ack = (flags & tcp::TcpFlags::ACK) != 0;
 
-                                let (rst_seq, rst_ack, rst_flags, rst_window) = if shared.stealth >= StealthLevel::Basic {
+                                let (rst_seq, rst_ack, rst_flags, rst_window) = if shared.stealth >= StealthLevel::Basic || shared.mimic.is_some() {
                                     if has_ack {
                                         // RFC 793: ACK set -> <SEQ=SEG.ACK><CTL=RST>
                                         (tcp_packet.get_acknowledgement(), 0, tcp::TcpFlags::RST, 0)
