@@ -62,16 +62,16 @@
 - Modify: `fake-tcp/src/lib.rs`
 - Modify: `fake-tcp/src/packet.rs`
 
-- [ ] Define `MimicProfile` struct in lib.rs with fields: `ip_id_incrementing: bool`, `wscale: u8`, `window_raw: u16`, `psh_always: bool`
-- [ ] Add `MimicProfile::udp2raw()` constructor returning: `ip_id_incrementing=true`, `wscale=5`, `window_raw=41000`, `psh_always=false`
-- [ ] Define `MimicParams` struct in packet.rs for per-packet overrides: `ip_id: u16`, `wscale: Option<u8>` — passed as `Option<MimicParams>` to `build_tcp_packet()` (single new param instead of multiple)
-- [ ] Add `Option<MimicProfile>` to `Shared` struct and wire through `Stack::new()` signature
-- [ ] Pass mimic from Shared to `Socket::new()` in both outbound (connect) and inbound (accept) paths
-- [ ] Store `mimic: Option<MimicProfile>` (immutable config) in Socket struct; add `ip_id_counter: Option<AtomicU16>` as per-socket mutable state initialized from profile
-- [ ] When mimic is active: force effective stealth to at least `StealthLevel::Standard` for timestamps, ISN, ACK frequency
-- [ ] Write unit tests for `MimicProfile::udp2raw()` default values
-- [ ] Write unit tests verifying Socket fields are correctly initialized from MimicProfile
-- [ ] Run tests — must pass before next task
+- [x] Define `MimicProfile` struct in lib.rs with fields: `ip_id_incrementing: bool`, `wscale: u8`, `window_raw: u16`, `psh_always: bool`
+- [x] Add `MimicProfile::udp2raw()` constructor returning: `ip_id_incrementing=true`, `wscale=5`, `window_raw=41000`, `psh_always=false`
+- [x] Define `MimicParams` struct in packet.rs for per-packet overrides: `ip_id: u16`, `wscale: Option<u8>` — passed as `Option<MimicParams>` to `build_tcp_packet()` (single new param instead of multiple)
+- [x] Add `Option<MimicProfile>` to `Shared` struct and wire through `Stack::new()` signature
+- [x] Pass mimic from Shared to `Socket::new()` in both outbound (connect) and inbound (accept) paths
+- [x] Store `mimic: Option<MimicProfile>` (immutable config) in Socket struct; add `ip_id_counter: Option<AtomicU16>` as per-socket mutable state initialized from profile
+- [x] When mimic is active: force effective stealth to at least `StealthLevel::Standard` for timestamps, ISN, ACK frequency
+- [x] Write unit tests for `MimicProfile::udp2raw()` default values
+- [x] Write unit tests verifying Socket fields are correctly initialized from MimicProfile
+- [x] Run tests — must pass before next task
 
 ### Task 2: Incrementing IP ID in packet construction
 

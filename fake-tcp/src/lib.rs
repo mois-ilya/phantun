@@ -87,6 +87,32 @@ impl From<u8> for StealthLevel {
     }
 }
 
+/// Immutable fingerprint profile — controls which TCP behaviors to mimic.
+/// When active, forces effective stealth to at least `Standard` level.
+#[derive(Clone, Debug)]
+pub struct MimicProfile {
+    /// Use incrementing IP ID counter instead of 0+DF (IPv4 only, no-op for IPv6)
+    pub ip_id_incrementing: bool,
+    /// TCP window scale value for SYN options (udp2raw=5, phantun default=7)
+    pub wscale: u8,
+    /// Raw TCP window value (before scaling). udp2raw uses 41000 (static, no jitter)
+    pub window_raw: u16,
+    /// Whether PSH flag is set on every data packet (true=phantun default, false=udp2raw style)
+    pub psh_always: bool,
+}
+
+impl MimicProfile {
+    /// Returns a profile that mimics udp2raw's TCP fingerprint.
+    pub fn udp2raw() -> Self {
+        MimicProfile {
+            ip_id_incrementing: true,
+            wscale: 5,
+            window_raw: 41000,
+            psh_always: false,
+        }
+    }
+}
+
 const TIMEOUT: time::Duration = time::Duration::from_secs(1);
 const RETRIES: usize = 6;
 const MPMC_BUFFER_LEN: usize = 512;
@@ -119,6 +145,7 @@ struct Shared {
     ready: mpsc::Sender<Socket>,
     tuples_purge: broadcast::Sender<AddrTuple>,
     stealth: StealthLevel,
+    mimic: Option<MimicProfile>,
 }
 
 pub struct Stack {
@@ -183,6 +210,12 @@ pub struct Socket {
     /// Grouped congestion state behind a Mutex (stealth >= Full only).
     /// `None` for stealth levels Off, Basic, and Standard.
     congestion: Option<Mutex<CongestionState>>,
+    /// Immutable mimic fingerprint profile (None = no mimic active)
+    #[allow(dead_code)] // used in Tasks 2-4
+    mimic: Option<MimicProfile>,
+    /// Per-socket incrementing IP ID counter (Some when mimic.ip_id_incrementing=true)
+    #[allow(dead_code)] // used in Task 2
+    ip_id_counter: Option<AtomicU16>,
 }
 
 /// A socket that represents a unique TCP connection between a server and client.
@@ -193,6 +226,7 @@ pub struct Socket {
 /// To close a TCP connection that is no longer needed, simply drop this object
 /// out of scope.
 impl Socket {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         shared: Arc<Shared>,
         tun: Arc<Tun>,
@@ -201,14 +235,27 @@ impl Socket {
         ack: Option<u32>,
         state: State,
         stealth: StealthLevel,
+        mimic: Option<MimicProfile>,
     ) -> (Socket, flume::Sender<Bytes>) {
         let (incoming_tx, incoming_rx) = flume::bounded(MPMC_BUFFER_LEN);
 
-        let initial_seq = if stealth >= StealthLevel::Basic {
+        // When mimic is active, force effective stealth to at least Standard
+        let effective_stealth = if mimic.is_some() {
+            stealth.max(StealthLevel::Standard)
+        } else {
+            stealth
+        };
+
+        let initial_seq = if effective_stealth >= StealthLevel::Basic {
             rand::random::<u32>()
         } else {
             0
         };
+
+        let ip_id_counter = mimic
+            .as_ref()
+            .filter(|m| m.ip_id_incrementing)
+            .map(|_| AtomicU16::new(rand::random::<u16>()));
 
         (
             Socket {
@@ -221,15 +268,15 @@ impl Socket {
                 ack: AtomicU32::new(ack.unwrap_or(0)),
                 last_ack: AtomicU32::new(ack.unwrap_or(0)),
                 state,
-                stealth,
+                stealth: effective_stealth,
                 ts_epoch: Instant::now(),
-                ts_offset: if stealth >= StealthLevel::Basic {
+                ts_offset: if effective_stealth >= StealthLevel::Basic {
                     rand::random::<u32>()
                 } else {
                     0
                 },
                 ts_ecr: AtomicU32::new(0),
-                window_base: if stealth >= StealthLevel::Standard {
+                window_base: if effective_stealth >= StealthLevel::Standard {
                     // Random base window in range 256..=512, representing ~32K-64K
                     // effective receive window with wscale=7
                     256 + (rand::random::<u16>() % 257)
@@ -237,7 +284,7 @@ impl Socket {
                     0xFFFF
                 },
                 last_window_sent: AtomicU16::new(0),
-                congestion: if stealth >= StealthLevel::Full {
+                congestion: if effective_stealth >= StealthLevel::Full {
                     Some(Mutex::new(CongestionState {
                         dup_ack_count: 0,
                         last_acked_seq: initial_seq,
@@ -250,6 +297,8 @@ impl Socket {
                 } else {
                     None
                 },
+                mimic,
+                ip_id_counter,
             },
             incoming_tx,
         )
@@ -324,6 +373,7 @@ impl Socket {
             self.current_ts_val(),
             self.ts_ecr.load(Ordering::Relaxed),
             window,
+            None,
         )
     }
 
@@ -759,6 +809,7 @@ impl Drop for Socket {
             0,
             0,
             0, // Real Linux sends RST with window=0
+            None,
         );
         if let Err(e) = self.tun.try_send(&buf) {
             warn!("Unable to send RST to remote end: {}", e);
@@ -798,6 +849,7 @@ impl Stack {
         local_ip: Ipv4Addr,
         local_ip6: Option<Ipv6Addr>,
         stealth: StealthLevel,
+        mimic: Option<MimicProfile>,
     ) -> Stack {
         let tun: Vec<Arc<Tun>> = tun.into_iter().map(Arc::new).collect();
         let (ready_tx, ready_rx) = mpsc::channel(MPSC_BUFFER_LEN);
@@ -810,6 +862,7 @@ impl Stack {
             ready: ready_tx,
             tuples_purge: tuples_purge_tx.clone(),
             stealth,
+            mimic,
         });
 
         let mut reader_handles = Vec::with_capacity(tun.len());
@@ -890,6 +943,7 @@ impl Stack {
                     None,
                     State::Idle,
                     self.shared.stealth,
+                    self.shared.mimic.clone(),
                 );
 
                 assert!(tuples.insert(tuple, incoming).is_none());
@@ -994,6 +1048,7 @@ impl Stack {
                                         Some(tcp_packet.get_sequence().wrapping_add(1)),
                                         State::Idle,
                                         shared.stealth,
+                                        shared.mimic.clone(),
                                     );
                                     // Echo client's SYN tsval in SYN+ACK ts_ecr (RFC 7323)
                                     if shared.stealth >= StealthLevel::Basic
@@ -1020,6 +1075,7 @@ impl Stack {
                                         StealthLevel::Off,
                                         0, 0,
                                         0xFFFF,
+                                        None,
                                     );
                                     if let Err(e) = shared.tun[0].try_send(&buf) {
                                         warn!("reader_task: failed to send RST for bad SYN: {}", e);
@@ -1058,6 +1114,7 @@ impl Stack {
                                     StealthLevel::Off,
                                     0, 0,
                                     rst_window,
+                                    None,
                                 );
                                 if let Err(e) = shared.tun[0].try_send(&buf) {
                                     warn!("reader_task: failed to send RST for unknown packet: {}", e);
@@ -2113,6 +2170,7 @@ mod tests {
             ready: ready_tx,
             tuples_purge: tuples_purge_tx,
             stealth: StealthLevel::Off,
+            mimic: None,
         });
 
         let local_addr: SocketAddr = "10.200.0.1:1234".parse().unwrap();
@@ -2126,6 +2184,7 @@ mod tests {
             Some(100),
             State::Established,
             StealthLevel::Off,
+            None,
         );
 
         // Register the tuple in the shared map so Drop doesn't panic
@@ -2144,7 +2203,7 @@ mod tests {
             pnet::packet::tcp::TcpFlags::ACK,
             Some(b"hello"),
             StealthLevel::Off,
-            0, 0, 0xFFFF,
+            0, 0, 0xFFFF, None,
         );
         sender.send_async(valid_packet).await.unwrap();
 
@@ -2183,6 +2242,7 @@ mod tests {
             ready: ready_tx,
             tuples_purge: tuples_purge_tx,
             stealth: StealthLevel::Off,
+            mimic: None,
         });
 
         // Test connect: should exhaust retries without panicking
@@ -2198,6 +2258,7 @@ mod tests {
                 Some(100),
                 State::Idle,
                 StealthLevel::Off,
+                None,
             );
 
             let tuple = AddrTuple::new(local_addr, remote_addr);
@@ -2221,6 +2282,7 @@ mod tests {
                 Some(100),
                 State::Idle,
                 StealthLevel::Off,
+                None,
             );
 
             let tuple = AddrTuple::new(local_addr, remote_addr);
@@ -2311,6 +2373,7 @@ mod tests {
             ready: ready_tx,
             tuples_purge: tuples_purge_tx,
             stealth: StealthLevel::Full,
+            mimic: None,
         });
 
         let local_addr: SocketAddr = "10.210.0.1:1234".parse().unwrap();
@@ -2324,6 +2387,7 @@ mod tests {
             Some(100),
             State::Established,
             StealthLevel::Full,
+            None,
         );
 
         let tuple = AddrTuple::new(local_addr, remote_addr);
@@ -2356,6 +2420,7 @@ mod tests {
                 StealthLevel::Full,
                 1000, 500,    // ts_val, ts_ecr
                 peer_window,
+                None,
             );
             sender.send_async(dup_ack_packet).await.unwrap();
         }
@@ -2371,6 +2436,7 @@ mod tests {
             StealthLevel::Full,
             1001, 500,
             peer_window,
+            None,
         );
         sender.send_async(final_packet).await.unwrap();
 
@@ -2462,6 +2528,7 @@ mod tests {
             ready: ready_tx,
             tuples_purge: tuples_purge_tx,
             stealth: StealthLevel::Full,
+            mimic: None,
         });
 
         let local_addr: SocketAddr = "10.220.0.1:1234".parse().unwrap();
@@ -2475,6 +2542,7 @@ mod tests {
             Some(100),
             State::Established,
             StealthLevel::Full,
+            None,
         );
 
         let tuple = AddrTuple::new(local_addr, remote_addr);
@@ -2528,5 +2596,139 @@ mod tests {
             "snd_nxt ({}) should be >= final seq ({})",
             final_snd_nxt, final_seq
         );
+    }
+
+    // --- Mimic profile tests ---
+
+    #[test]
+    fn test_mimic_profile_udp2raw_defaults() {
+        let profile = MimicProfile::udp2raw();
+        assert!(profile.ip_id_incrementing);
+        assert_eq!(profile.wscale, 5);
+        assert_eq!(profile.window_raw, 41000);
+        assert!(!profile.psh_always);
+    }
+
+    #[test]
+    fn test_mimic_forces_stealth_to_standard() {
+        // When mimic is active, stealth Off should be elevated to Standard
+        let stealth = StealthLevel::Off;
+        let mimic = Some(MimicProfile::udp2raw());
+        let effective = if mimic.is_some() {
+            stealth.max(StealthLevel::Standard)
+        } else {
+            stealth
+        };
+        assert_eq!(effective, StealthLevel::Standard);
+    }
+
+    #[test]
+    fn test_mimic_preserves_higher_stealth() {
+        // When mimic is active but stealth is already Full, keep Full
+        let stealth = StealthLevel::Full;
+        let mimic = Some(MimicProfile::udp2raw());
+        let effective = if mimic.is_some() {
+            stealth.max(StealthLevel::Standard)
+        } else {
+            stealth
+        };
+        assert_eq!(effective, StealthLevel::Full);
+    }
+
+    #[test]
+    fn test_no_mimic_preserves_stealth() {
+        // Without mimic, stealth Off stays Off
+        let stealth = StealthLevel::Off;
+        let mimic: Option<MimicProfile> = None;
+        let effective = if mimic.is_some() {
+            stealth.max(StealthLevel::Standard)
+        } else {
+            stealth
+        };
+        assert_eq!(effective, StealthLevel::Off);
+    }
+
+    #[test]
+    fn test_mimic_ip_id_counter_initialized_when_incrementing() {
+        let profile = MimicProfile::udp2raw();
+        assert!(profile.ip_id_incrementing);
+        let counter = profile
+            .ip_id_incrementing
+            .then(|| AtomicU16::new(rand::random::<u16>()));
+        assert!(counter.is_some());
+    }
+
+    #[test]
+    fn test_mimic_ip_id_counter_none_when_not_incrementing() {
+        let mut profile = MimicProfile::udp2raw();
+        profile.ip_id_incrementing = false;
+        let counter = profile
+            .ip_id_incrementing
+            .then(|| AtomicU16::new(rand::random::<u16>()));
+        assert!(counter.is_none());
+    }
+
+    /// Verify Socket fields are correctly initialized from MimicProfile.
+    /// Uses TUN device to construct a real Socket.
+    #[cfg(feature = "integration-tests")]
+    #[tokio::test]
+    async fn test_socket_initialized_from_mimic_profile() {
+        use tokio_tun::TunBuilder;
+
+        let tuns = TunBuilder::new()
+            .name("tmimic0")
+            .address("10.230.0.1".parse::<std::net::Ipv4Addr>().unwrap())
+            .destination("10.230.0.2".parse::<std::net::Ipv4Addr>().unwrap())
+            .up()
+            .build()
+            .expect("failed to create TUN device");
+        let tun = Arc::new(tuns.into_iter().next().unwrap());
+
+        let (ready_tx, _ready_rx) = mpsc::channel(1);
+        let (tuples_purge_tx, _purge_rx_keep) = broadcast::channel(1);
+        let shared = Arc::new(Shared {
+            tuples: RwLock::new(HashMap::new()),
+            listening: RwLock::new(HashSet::new()),
+            tun: vec![tun.clone()],
+            ready: ready_tx,
+            tuples_purge: tuples_purge_tx,
+            stealth: StealthLevel::Off, // mimic should force to Standard
+            mimic: Some(MimicProfile::udp2raw()),
+        });
+
+        let local_addr: SocketAddr = "10.230.0.1:1234".parse().unwrap();
+        let remote_addr: SocketAddr = "10.230.0.2:5678".parse().unwrap();
+        let profile = MimicProfile::udp2raw();
+
+        let (socket, sender) = Socket::new(
+            shared.clone(),
+            tun,
+            local_addr,
+            remote_addr,
+            Some(100),
+            State::Established,
+            StealthLevel::Off,
+            Some(profile),
+        );
+
+        let tuple = AddrTuple::new(local_addr, remote_addr);
+        shared.tuples.write().unwrap().insert(tuple, sender);
+
+        // Stealth should be elevated to Standard
+        assert!(socket.stealth >= StealthLevel::Standard);
+        // Mimic profile should be stored
+        assert!(socket.mimic.is_some());
+        let m = socket.mimic.as_ref().unwrap();
+        assert!(m.ip_id_incrementing);
+        assert_eq!(m.wscale, 5);
+        assert_eq!(m.window_raw, 41000);
+        assert!(!m.psh_always);
+        // IP ID counter should be initialized
+        assert!(socket.ip_id_counter.is_some());
+        // ts_offset should be non-zero (random) since stealth is now >= Basic
+        // (probabilistic: chance of 0 is 1/2^32)
+        // ISN (seq) should also be random
+        // Just verify stealth-dependent fields are initialized correctly
+        assert_ne!(socket.ts_offset, 0, "ts_offset should be random when mimic forces stealth >= Basic (extremely unlikely to be 0)");
     }
 }

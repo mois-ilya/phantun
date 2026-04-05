@@ -26,6 +26,7 @@ fn bench_stealth_level(c: &mut Criterion, group_name: &str, stealth: StealthLeve
                     ts_val,
                     ts_ecr,
                     window,
+                    None,
                 ))
             });
         });

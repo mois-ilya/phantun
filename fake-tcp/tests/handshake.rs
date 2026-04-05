@@ -66,7 +66,7 @@ async fn test_server_rejects_nonzero_seq_syn() {
     let crafted_dst: SocketAddr = format!("10.0.1.1:{SERVER_PORT}").parse().unwrap();
     let syn_seq: u32 = 1; // non-zero → server must reject
 
-    let syn_pkt = build_tcp_packet(crafted_src, crafted_dst, syn_seq, 0, tcp::TcpFlags::SYN, None, StealthLevel::Off, 0, 0, 0xFFFF);
+    let syn_pkt = build_tcp_packet(crafted_src, crafted_dst, syn_seq, 0, tcp::TcpFlags::SYN, None, StealthLevel::Off, 0, 0, 0xFFFF, None);
     env.raw_client_tun
         .send(&syn_pkt)
         .await
@@ -127,7 +127,7 @@ async fn test_syn_ack_window_matches_linux_default() {
     // Send a valid SYN with seq=0.
     let syn_pkt = build_tcp_packet(
         crafted_src, crafted_dst, 0, 0, tcp::TcpFlags::SYN,
-        None, StealthLevel::Off, 0, 0, 0xFFFF,
+        None, StealthLevel::Off, 0, 0, 0xFFFF, None,
     );
     env.raw_client_tun.send(&syn_pkt).await.expect("raw TUN send failed");
 

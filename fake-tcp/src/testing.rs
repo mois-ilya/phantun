@@ -290,8 +290,8 @@ pub async fn setup_test_env_with_config(stealth: StealthLevel, tun_queues: usize
     );
 
     // ── 7. Build Stack objects ───────────────────────────────────────────────
-    let client_stack = Stack::new(client_tuns, tun_c_dest, None, stealth);
-    let server_stack = Stack::new(server_tuns, tun_s_addr, None, stealth);
+    let client_stack = Stack::new(client_tuns, tun_c_dest, None, stealth, None);
+    let server_stack = Stack::new(server_tuns, tun_s_addr, None, stealth, None);
     let raw_client_tun = raw_tuns.into_iter().next().unwrap();
 
     TestEnv {
