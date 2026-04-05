@@ -21,11 +21,10 @@ cargo clippy --verbose          # lint (CI runs this)
 ## Testing
 
 ```bash
-./scripts/run-tests.sh       # auto-detects: Docker inside → cargo test, outside → docker build+run
-cargo clippy -p fake-tcp --verbose  # quick lint (macOS)
+./scripts/run-tests.sh              # tests (unit + integration)
+./scripts/run-benchmarks.sh         # benchmarks (micro + throughput)
+cargo clippy -p fake-tcp --verbose  # lint
 ```
-
-`cargo test --workspace` does NOT compile on macOS (tokio-tun is linux-only). `scripts/run-tests.sh` handles this automatically.
 
 ## Git Hooks
 
@@ -43,6 +42,9 @@ git config core.hooksPath .githooks
 - **`fake-tcp/`** — Core library. Userspace TCP stack over TUN interface.
   - `lib.rs` — `Stack` (connection manager), `Socket` (per-connection async I/O), `StealthLevel` enum
   - `packet.rs` — TCP/IP packet construction/parsing (IPv4 + IPv6), `TcpBuildOptions` for stealth params
+  - `testing.rs` — Integration test helpers (`TestEnv`, netns/TUN setup), feature-gated behind `integration-tests`
+  - `benches/` — Criterion benchmarks: `packet_construction` (per-level microbench), `throughput` (TUN tunnel data transfer, requires `integration-tests` feature)
+- **`scripts/`** — Runner scripts: `run-tests.sh` (test suite), `run-benchmarks.sh` (benchmarks). Auto-detect Docker vs native environment.
 - **`phantun/`** — Client and server binaries
   - `src/bin/client.rs` — Listens UDP, tunnels through fake-TCP to server
   - `src/bin/server.rs` — Accepts fake-TCP, forwards to backend UDP
@@ -62,11 +64,11 @@ git config core.hooksPath .githooks
 
 ## Gotchas
 
-- `cargo test --workspace` does NOT compile on macOS — tokio-tun is linux-only. Use Docker
 - `--stealth 0` must remain byte-identical to pre-stealth output (backward compatibility invariant)
 - Level 3 congestion simulation intentionally throttles throughput for realism
-- Integration tests require DNAT iptables rules to route TCP to TUN peer address
 - `parse_ip_packet` in `packet.rs` panics on malformed/short buffers — known issue, see `#[should_panic]` tests
 - Binaries require `CAP_NET_ADMIN` or root for TUN device creation
-- Docker integration tests need `--privileged` flag (network namespaces + iptables)
 - Cross-compilation uses `cross` tool; MIPS targets require nightly toolchain
+- Integration test helpers live in `fake-tcp/src/testing.rs` (not `tests/common/mod.rs`, which is a thin re-export)
+- `cargo test --workspace` does not compile on macOS (tokio-tun is Linux-only); use `scripts/run-tests.sh`
+- Integration tests and throughput benchmarks require Linux (`--privileged` Docker for network namespaces + iptables)

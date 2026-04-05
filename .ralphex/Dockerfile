@@ -16,11 +16,12 @@ RUN rustc --version && cargo --version
 
 # Install iproute2 + iptables for integration tests (TUN/network namespaces + DNAT)
 # sudo: integration tests need root for setns() syscall and ip netns commands
-# SECURITY NOTE: sudo for cargo is intentional — this container runs with --privileged
-# for integration tests (network namespaces, iptables). The app user already has full
-# root access via --privileged, so sudo adds no additional attack surface.
+# SECURITY NOTE: sudo rules are restricted to exact commands needed by run-tests.sh
+# and run-benchmarks.sh rather than blanket cargo access. Scripts build as `app`
+# first (--no-run), so build.rs / proc-macro code executes unprivileged. Only the
+# test/bench execution runs as root (needed for network namespace operations).
 RUN apk add --no-cache iproute2 iptables sudo \
-    && printf 'Defaults:app secure_path="/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\nDefaults:app env_keep += "RUSTUP_HOME CARGO_HOME"\napp ALL=(root) NOPASSWD: /usr/local/cargo/bin/cargo test -p fake-tcp --features integration-tests\n' > /etc/sudoers.d/cargo-test \
+    && printf 'Defaults:app secure_path="/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\nDefaults:app env_keep += "RUSTUP_HOME CARGO_HOME"\napp ALL=(root) NOPASSWD: /usr/local/cargo/bin/cargo test -p fake-tcp --features integration-tests\napp ALL=(root) NOPASSWD: /usr/local/cargo/bin/cargo bench -p fake-tcp --bench throughput --features integration-tests\n' > /etc/sudoers.d/cargo-test \
     && mkdir -p /dev/net && mknod /dev/net/tun c 10 200 && chmod 666 /dev/net/tun
 
 # Git hooks: always run full test suite on commit

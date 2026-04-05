@@ -11,9 +11,11 @@ if [ -f /.dockerenv ]; then
         echo "Running tests directly (inside Docker, root)..."
         cargo test -p fake-tcp --features integration-tests
     else
+        echo "Building tests (unprivileged)..."
+        cargo test -p fake-tcp --features integration-tests --no-run
         echo "Running tests via sudo (inside Docker, non-root)..."
         sudo /usr/local/cargo/bin/cargo test -p fake-tcp --features integration-tests
-        # Fix ownership of cargo cache after root-privileged test run (Finding 2)
+        # Fix ownership of cargo cache after root-privileged test run
         sudo chown -R "$(id -u):$(id -g)" /usr/local/cargo/registry /usr/local/cargo/git 2>/dev/null || true
     fi
 else
@@ -21,3 +23,6 @@ else
     docker build -f Dockerfile.test -t phantun-test .
     docker run --privileged --rm phantun-test
 fi
+
+echo ""
+echo "=== ALL TESTS PASSED ==="
