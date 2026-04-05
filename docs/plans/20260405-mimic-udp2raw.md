@@ -94,14 +94,14 @@
 - Modify: `fake-tcp/src/packet.rs`
 - Modify: `fake-tcp/src/lib.rs`
 
-- [ ] In `build_tcp_packet()`: when `MimicParams.wscale` is Some, use it in SYN options instead of hardcoded 7
-- [ ] In Socket::new(): when mimic is Some, set `window_base` to `mimic.window_raw` (exact value, no jitter — match udp2raw's static window behavior)
-- [ ] Override SYN window: when mimic is Some, use `mimic.window_raw` as SYN window instead of 64240
-- [ ] In `current_window()`: when mimic is Some, return `mimic.window_raw` directly (static, matching udp2raw)
-- [ ] Write unit tests: SYN packet with wscale=5 has correct option bytes at correct offset (offset 18, value 5)
-- [ ] Write unit tests: window field in mimic mode equals window_raw exactly (41000), no jitter
-- [ ] Write unit tests: without mimic, window and wscale behavior unchanged per stealth level
-- [ ] Run tests — must pass before next task
+- [x] In `build_tcp_packet()`: when `MimicParams.wscale` is Some, use it in SYN options instead of hardcoded 7
+- [x] In Socket::new(): when mimic is Some, set `window_base` to `mimic.window_raw` (exact value, no jitter — match udp2raw's static window behavior)
+- [x] Override SYN window: when mimic is Some, use `mimic.window_raw` as SYN window instead of 64240
+- [x] In `current_window()`: when mimic is Some, return `mimic.window_raw` directly (static, matching udp2raw)
+- [x] Write unit tests: SYN packet with wscale=5 has correct option bytes at correct offset (offset 18, value 5)
+- [x] Write unit tests: window field in mimic mode equals window_raw exactly (41000), no jitter
+- [x] Write unit tests: without mimic, window and wscale behavior unchanged per stealth level
+- [x] Run tests — must pass before next task
 
 ### Task 4: PSH flag behavior for mimic mode
 

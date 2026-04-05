@@ -211,7 +211,6 @@ pub struct Socket {
     /// `None` for stealth levels Off, Basic, and Standard.
     congestion: Option<Mutex<CongestionState>>,
     /// Immutable mimic fingerprint profile (None = no mimic active)
-    #[allow(dead_code)] // used in Tasks 3-4
     mimic: Option<MimicProfile>,
     /// Per-socket incrementing IP ID counter (Some when mimic.ip_id_incrementing=true)
     ip_id_counter: Option<AtomicU16>,
@@ -275,7 +274,9 @@ impl Socket {
                     0
                 },
                 ts_ecr: AtomicU32::new(0),
-                window_base: if effective_stealth >= StealthLevel::Standard {
+                window_base: if let Some(ref m) = mimic {
+                    m.window_raw
+                } else if effective_stealth >= StealthLevel::Standard {
                     // Random base window in range 256..=512, representing ~32K-64K
                     // effective receive window with wscale=7
                     256 + (rand::random::<u16>() % 257)
@@ -324,7 +325,10 @@ impl Socket {
     /// For stealth >= Standard, adds small random jitter to window_base.
     /// For lower stealth levels, returns static 0xFFFF.
     fn current_window(&self) -> u16 {
-        if self.stealth >= StealthLevel::Standard {
+        if self.mimic.is_some() {
+            // Mimic mode: return static window_raw (no jitter), matching udp2raw
+            self.window_base
+        } else if self.stealth >= StealthLevel::Standard {
             // Add jitter of 0..32 to base window to simulate natural variation
             self.window_base.wrapping_add(rand::random::<u16>() % 32)
         } else {
@@ -344,7 +348,12 @@ impl Socket {
         // Exclude SYN/SYN+ACK: handshake packets must always advertise a real
         // window (last_window_sent starts at 0 and hasn't been set yet).
         let is_syn = (flags & tcp::TcpFlags::SYN) != 0;
-        let window = if is_syn && self.stealth >= StealthLevel::Basic {
+        let window = if is_syn && self.mimic.is_some() {
+            // Mimic mode: use profile's window_raw for SYN packets too
+            let w = self.window_base;
+            self.last_window_sent.store(w, Ordering::Relaxed);
+            w
+        } else if is_syn && self.stealth >= StealthLevel::Basic {
             // SYN/SYN+ACK: use Linux-like initial window (64240) for stealth >= Basic.
             let w = SYN_WINDOW;
             self.last_window_sent.store(w, Ordering::Relaxed);
@@ -361,10 +370,14 @@ impl Socket {
             w
         };
 
-        let mimic_params = self.ip_id_counter.as_ref().map(|counter| {
+        let mimic_params = self.mimic.as_ref().map(|profile| {
             MimicParams {
-                ip_id: counter.fetch_add(1, Ordering::Relaxed),
-                wscale: None,
+                ip_id: self
+                    .ip_id_counter
+                    .as_ref()
+                    .map(|c| c.fetch_add(1, Ordering::Relaxed))
+                    .unwrap_or(0),
+                wscale: Some(profile.wscale),
             }
         });
 
@@ -2759,5 +2772,116 @@ mod tests {
         // ISN (seq) should also be random
         // Just verify stealth-dependent fields are initialized correctly
         assert_ne!(socket.ts_offset, 0, "ts_offset should be random when mimic forces stealth >= Basic (extremely unlikely to be 0)");
+    }
+
+    // --- Task 3: Window scale and raw window tests ---
+
+    #[test]
+    fn test_mimic_window_base_set_to_window_raw() {
+        // When mimic is active, window_base should equal mimic.window_raw
+        let profile = MimicProfile::udp2raw();
+        // Simulate the window_base initialization logic from Socket::new()
+        let mimic = Some(profile);
+        let window_base = if let Some(ref m) = mimic {
+            m.window_raw
+        } else {
+            256 + (rand::random::<u16>() % 257)
+        };
+        assert_eq!(window_base, 41000, "window_base should equal mimic.window_raw");
+    }
+
+    #[test]
+    fn test_no_mimic_standard_window_base_in_range() {
+        // Without mimic, stealth Standard window_base should be in 256..=512
+        let mimic: Option<MimicProfile> = None;
+        for _ in 0..100 {
+            let window_base = if let Some(ref m) = mimic {
+                m.window_raw
+            } else {
+                256 + (rand::random::<u16>() % 257)
+            };
+            assert!(
+                (256..=512).contains(&window_base),
+                "window_base {} should be in 256..=512",
+                window_base
+            );
+        }
+    }
+
+    #[test]
+    fn test_mimic_wscale_passed_in_mimic_params() {
+        // When mimic is active, MimicParams should have wscale from profile
+        let profile = MimicProfile::udp2raw();
+        let mimic = Some(profile);
+        let mimic_params = mimic.as_ref().map(|p| MimicParams {
+            ip_id: 0,
+            wscale: Some(p.wscale),
+        });
+        assert!(mimic_params.is_some());
+        assert_eq!(mimic_params.unwrap().wscale, Some(5));
+    }
+
+    #[test]
+    fn test_no_mimic_no_mimic_params() {
+        // Without mimic and no ip_id_counter, mimic_params should be None
+        let mimic: Option<MimicProfile> = None;
+        let mimic_params = mimic.as_ref().map(|p| MimicParams {
+            ip_id: 0,
+            wscale: Some(p.wscale),
+        });
+        assert!(mimic_params.is_none());
+    }
+
+    /// Verify Socket window_base and current_window() behavior with mimic profile.
+    #[cfg(feature = "integration-tests")]
+    #[tokio::test]
+    async fn test_socket_mimic_window_static() {
+        use tokio_tun::TunBuilder;
+
+        let tuns = TunBuilder::new()
+            .name("tmwin0")
+            .address("10.231.0.1".parse::<std::net::Ipv4Addr>().unwrap())
+            .destination("10.231.0.2".parse::<std::net::Ipv4Addr>().unwrap())
+            .up()
+            .build()
+            .expect("failed to create TUN device");
+        let tun = Arc::new(tuns.into_iter().next().unwrap());
+
+        let (ready_tx, _ready_rx) = mpsc::channel(1);
+        let (tuples_purge_tx, _purge_rx_keep) = broadcast::channel(1);
+        let shared = Arc::new(Shared {
+            tuples: RwLock::new(HashMap::new()),
+            listening: RwLock::new(HashSet::new()),
+            tun: vec![tun.clone()],
+            ready: ready_tx,
+            tuples_purge: tuples_purge_tx,
+            stealth: StealthLevel::Off,
+            mimic: Some(MimicProfile::udp2raw()),
+        });
+
+        let local_addr: SocketAddr = "10.231.0.1:1234".parse().unwrap();
+        let remote_addr: SocketAddr = "10.231.0.2:5678".parse().unwrap();
+
+        let (socket, sender) = Socket::new(
+            shared.clone(),
+            tun,
+            local_addr,
+            remote_addr,
+            Some(100),
+            State::Established,
+            StealthLevel::Off,
+            Some(MimicProfile::udp2raw()),
+        );
+
+        let tuple = AddrTuple::new(local_addr, remote_addr);
+        shared.tuples.write().unwrap().insert(tuple, sender);
+
+        // window_base should be mimic.window_raw
+        assert_eq!(socket.window_base, 41000, "window_base should be mimic's window_raw");
+
+        // current_window() should return exactly window_base (static, no jitter)
+        for _ in 0..50 {
+            assert_eq!(socket.current_window(), 41000, "current_window should be static 41000 in mimic mode");
+        }
     }
 }

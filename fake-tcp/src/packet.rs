@@ -146,11 +146,12 @@ pub fn build_tcp_packet(
             // Timestamps: tsval, tsecr
             opts[8..12].copy_from_slice(&ts_val.to_be_bytes());
             opts[12..16].copy_from_slice(&ts_ecr.to_be_bytes());
-            // NOP + Window scale: kind=3, len=3, shift=7
+            // NOP + Window scale: kind=3, len=3, shift=N
+            let wscale_value = mimic.and_then(|m| m.wscale).unwrap_or(7);
             opts[16] = 1;
             opts[17] = 3;
             opts[18] = 3;
-            opts[19] = 7;
+            opts[19] = wscale_value;
         } else {
             let wscale = tcp::TcpOption::wscale(14);
             tcp.set_options(&[tcp::TcpOption::nop(), wscale]);
@@ -1658,5 +1659,93 @@ mod tests {
         let mut cksm = internet_checksum::Checksum::new();
         cksm.add_bytes(&pkt[..IPV4_HEADER_LEN]);
         assert_eq!(cksm.checksum(), [0, 0], "IP checksum should be valid");
+    }
+
+    // --- Task 3: Configurable window scale and raw window ---
+
+    #[test]
+    fn test_syn_mimic_wscale_5_at_correct_offset() {
+        // SYN with stealth >= Basic and mimic wscale=5 should have wscale=5 at option offset 18
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let mp = MimicParams { ip_id: 0, wscale: Some(5) };
+        let pkt = build_tcp_packet(
+            local, remote, 0, 0, tcp::TcpFlags::SYN, None,
+            StealthLevel::Basic, 1000, 0, 41000, Some(&mp),
+        );
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        let opts = tcp_pkt.get_options_raw();
+        // Stealth >= Basic SYN has 20-byte options: MSS(4) + SACK+TS_hdr(4) + TS(8) + NOP+wscale(4)
+        assert_eq!(opts.len(), 20);
+        assert_eq!(opts[16], 1, "NOP before wscale");
+        assert_eq!(opts[17], 3, "wscale kind");
+        assert_eq!(opts[18], 3, "wscale len");
+        assert_eq!(opts[19], 5, "wscale shift should be 5 from mimic");
+    }
+
+    #[test]
+    fn test_syn_mimic_wscale_none_defaults_to_7() {
+        // SYN with stealth >= Basic and mimic wscale=None should use default 7
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let mp = MimicParams { ip_id: 0, wscale: None };
+        let pkt = build_tcp_packet(
+            local, remote, 0, 0, tcp::TcpFlags::SYN, None,
+            StealthLevel::Basic, 1000, 0, 0xFFFF, Some(&mp),
+        );
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        let opts = tcp_pkt.get_options_raw();
+        assert_eq!(opts[19], 7, "wscale shift should default to 7 when mimic wscale is None");
+    }
+
+    #[test]
+    fn test_syn_no_mimic_wscale_unchanged() {
+        // SYN with stealth >= Basic and no mimic should have wscale=7
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let pkt = build_tcp_packet(
+            local, remote, 0, 0, tcp::TcpFlags::SYN, None,
+            StealthLevel::Basic, 1000, 0, 0xFFFF, None,
+        );
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        let opts = tcp_pkt.get_options_raw();
+        assert_eq!(opts[19], 7, "wscale shift should be 7 without mimic");
+    }
+
+    #[test]
+    fn test_syn_stealth_off_no_mimic_wscale_14() {
+        // SYN with stealth Off and no mimic should have wscale=14 (original behavior)
+        let pkt = ipv4_syn_packet();
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        let opts = tcp_pkt.get_options_raw();
+        assert_eq!(opts[3], 14, "stealth Off wscale should be 14");
+    }
+
+    #[test]
+    fn test_mimic_window_raw_in_data_packet() {
+        // Data packet with mimic window=41000 should have window=41000
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let mp = MimicParams { ip_id: 1, wscale: Some(5) };
+        let pkt = build_tcp_packet(
+            local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
+            StealthLevel::Standard, 5000, 3000, 41000, Some(&mp),
+        );
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_window(), 41000, "window should be mimic's window_raw value");
+    }
+
+    #[test]
+    fn test_mimic_window_raw_in_syn_packet() {
+        // SYN packet with mimic window=41000 should have window=41000
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let mp = MimicParams { ip_id: 0, wscale: Some(5) };
+        let pkt = build_tcp_packet(
+            local, remote, 0, 0, tcp::TcpFlags::SYN, None,
+            StealthLevel::Standard, 1000, 0, 41000, Some(&mp),
+        );
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_window(), 41000, "SYN window should be mimic's window_raw");
     }
 }
