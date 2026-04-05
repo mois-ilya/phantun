@@ -132,13 +132,13 @@
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] Verify: `--stealth 0` still produces byte-identical packets to pre-mimic code (backward compat)
-- [ ] Verify: `--stealth 2` without `--mimic` behaves identically to before
-- [ ] Verify: `--mimic udp2raw` produces packets with: incrementing IP ID (non-zero), wscale=5, raw window=41000, no PSH on data
-- [ ] Verify: each `--mimic-no-*` flag correctly disables only its target feature
-- [ ] Verify: `--mimic udp2raw --mimic-no-ipid --mimic-no-wscale --mimic-no-psh --mimic-no-window` produces packets equivalent to `--stealth 2` behavior
-- [ ] Run full test suite: `./scripts/run-tests.sh`
-- [ ] Run clippy: `cargo clippy -p fake-tcp --verbose`
+- [x] Verify: `--stealth 0` still produces byte-identical packets to pre-mimic code (backward compat)
+- [x] Verify: `--stealth 2` without `--mimic` behaves identically to before
+- [x] Verify: `--mimic udp2raw` produces packets with: incrementing IP ID (non-zero), wscale=5, raw window=41000, no PSH on data
+- [x] Verify: each `--mimic-no-*` flag correctly disables only its target feature
+- [x] Verify: `--mimic udp2raw --mimic-no-ipid --mimic-no-wscale --mimic-no-psh --mimic-no-window` produces packets equivalent to `--stealth 2` behavior
+- [x] Run full test suite: `./scripts/run-tests.sh`
+- [x] Run clippy: `cargo clippy -p fake-tcp --verbose`
 
 ### Task 7: [Final] Update documentation
 
