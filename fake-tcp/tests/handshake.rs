@@ -112,6 +112,91 @@ async fn test_server_rejects_nonzero_seq_syn() {
     env.shutdown().await;
 }
 
+/// Test: server SYN+ACK window matches Linux default (64240) at stealth >= Basic.
+///
+/// Send a valid SYN (seq=0) to a server with stealth=Basic, capture the SYN+ACK,
+/// and verify the TCP window field is 64240.
+#[tokio::test]
+async fn test_syn_ack_window_matches_linux_default() {
+    let mut env = common::setup_test_env_with_config(StealthLevel::Basic, 1).await;
+    env.server_stack.listen(SERVER_PORT);
+
+    let crafted_src: SocketAddr = "10.0.2.2:54322".parse().unwrap();
+    let crafted_dst: SocketAddr = format!("10.0.1.1:{SERVER_PORT}").parse().unwrap();
+
+    // Send a valid SYN with seq=0.
+    let syn_pkt = build_tcp_packet(
+        crafted_src, crafted_dst, 0, 0, tcp::TcpFlags::SYN,
+        None, StealthLevel::Off, 0, 0, 0xFFFF,
+    );
+    env.raw_client_tun.send(&syn_pkt).await.expect("raw TUN send failed");
+
+    // Read back the SYN+ACK, skipping non-TCP noise.
+    let frozen = loop {
+        let mut buf = BytesMut::zeroed(1500);
+        let n = timeout(TEST_TIMEOUT, env.raw_client_tun.recv(&mut buf))
+            .await
+            .expect("raw TUN recv timed out — server did not reply")
+            .expect("raw TUN recv error");
+        buf.truncate(n);
+        let candidate = buf.freeze();
+        if parse_ip_packet(&candidate).is_some() {
+            break candidate;
+        }
+    };
+
+    let (_ip, tcp_pkt) =
+        parse_ip_packet(&frozen).expect("server reply is not a valid IP/TCP packet");
+
+    assert_eq!(
+        tcp_pkt.get_flags(),
+        tcp::TcpFlags::SYN | tcp::TcpFlags::ACK,
+        "expected SYN+ACK, got flags 0x{:02x}",
+        tcp_pkt.get_flags()
+    );
+    assert_eq!(
+        tcp_pkt.get_window(),
+        64240,
+        "SYN+ACK window should be 64240 (Linux default), got {}",
+        tcp_pkt.get_window()
+    );
+}
+
+/// Test: data exchange works end-to-end at stealth=Standard.
+///
+/// The unit tests in lib.rs verify compute_syn_window returns the correct
+/// window values directly. This integration test confirms the full stack
+/// works with the SYN window fix applied (data packets flow after the
+/// handshake uses 64240 for SYN windows).
+#[tokio::test]
+async fn test_data_exchange_at_standard_stealth() {
+    let mut env = common::setup_test_env_with_config(StealthLevel::Standard, 1).await;
+    let server_addr: SocketAddr = format!("10.0.1.1:{SERVER_PORT}").parse().unwrap();
+    env.server_stack.listen(SERVER_PORT);
+
+    let (client_result, server_sock) = tokio::join!(
+        timeout(TEST_TIMEOUT, env.client_stack.connect(server_addr)),
+        timeout(TEST_TIMEOUT, env.server_stack.accept()),
+    );
+
+    let client_sock = client_result
+        .expect("connect timed out")
+        .expect("client connect returned None");
+    let server_sock = server_sock.expect("accept timed out");
+
+    // Send data from client to server at Standard stealth level.
+    // This exercises the data-packet window path (dynamic window_base, not 64240).
+    let payload = b"window test payload";
+    client_sock.send(payload).await.expect("send failed");
+
+    let mut buf = vec![0u8; 128];
+    let n = timeout(TEST_TIMEOUT, server_sock.recv(&mut buf))
+        .await
+        .expect("recv timed out")
+        .expect("recv returned None");
+    assert_eq!(&buf[..n], payload as &[u8]);
+}
+
 /// Test: dropping a Socket sends RST to the peer.
 ///
 /// After the handshake, dropping the client socket must cause the server's

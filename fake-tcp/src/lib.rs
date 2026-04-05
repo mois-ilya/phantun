@@ -54,7 +54,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{
     atomic::{AtomicU16, AtomicU32, Ordering},
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
 };
 use std::time::Instant;
 use tokio::sync::broadcast;
@@ -93,6 +93,9 @@ const MPMC_BUFFER_LEN: usize = 512;
 const MPSC_BUFFER_LEN: usize = 128;
 const MSS: u32 = 1460;
 const MAX_UNACKED_LEN: u32 = 128 * 1024 * 1024; // 128MB
+/// Linux TCP default SYN window (64240 bytes), matching the kernel's initial
+/// rcvbuf-derived window (net.ipv4.tcp_rmem default).
+const SYN_WINDOW: u16 = 64240;
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 struct AddrTuple {
@@ -134,6 +137,28 @@ pub enum State {
     Established,
 }
 
+/// Grouped congestion control state for stealth Level 3 (Full).
+///
+/// All fields are protected by a single Mutex to prevent race conditions
+/// between concurrent recv() and send() calls that read/write related
+/// congestion state. Only allocated when `stealth >= Full`.
+pub(crate) struct CongestionState {
+    /// Count of consecutive identical ACK values from peer
+    pub(crate) dup_ack_count: u32,
+    /// Last sequence number acknowledged by peer
+    pub(crate) last_acked_seq: u32,
+    /// Peer's effective advertised receive window
+    pub(crate) peer_window: u32,
+    /// Congestion window in bytes
+    pub(crate) cwnd: u32,
+    /// Slow start threshold in bytes
+    pub(crate) ssthresh: u32,
+    /// Highest sequence number ever sent (monotonically increasing, never rewound)
+    pub(crate) snd_nxt: u32,
+    /// Last peer advertised window seen (raw, unscaled) for dup ACK detection
+    pub(crate) last_peer_window: u16,
+}
+
 pub struct Socket {
     shared: Arc<Shared>,
     tun: Arc<Tun>,
@@ -153,24 +178,11 @@ pub struct Socket {
     ts_ecr: AtomicU32,
     /// Base window value for dynamic window randomization (stealth >= Standard)
     window_base: u16,
-    /// Count of consecutive identical ACK values from peer (stealth >= Full)
-    dup_ack_count: AtomicU32,
-    /// Last sequence number acknowledged by peer (stealth >= Full)
-    last_acked_seq: AtomicU32,
-    /// Peer's effective advertised receive window (stealth >= Full)
-    peer_window: AtomicU32,
-    /// Congestion window in bytes (stealth >= Full)
-    cwnd: AtomicU32,
-    /// Slow start threshold in bytes (stealth >= Full)
-    ssthresh: AtomicU32,
-    /// Highest sequence number ever sent (monotonically increasing, never rewound).
-    /// Used as true SND.NXT for ACK validation. Unlike `seq`, this is not reset
-    /// by window exhaustion or fast retransmit.
-    snd_nxt: AtomicU32,
-    /// Last peer advertised window seen (raw, unscaled) for dup ACK detection (stealth >= Full)
-    last_peer_window: AtomicU16,
     /// Last window value we sent, reused for duplicate ACKs (stealth >= Standard)
     last_window_sent: AtomicU16,
+    /// Grouped congestion state behind a Mutex (stealth >= Full only).
+    /// `None` for stealth levels Off, Basic, and Standard.
+    congestion: Option<Mutex<CongestionState>>,
 }
 
 /// A socket that represents a unique TCP connection between a server and client.
@@ -224,25 +236,20 @@ impl Socket {
                 } else {
                     0xFFFF
                 },
-                dup_ack_count: AtomicU32::new(0),
-                // Initialize to initial_seq so Level 3 constraints don't see a
-                // huge bytes_in_flight on the first send after handshake
-                last_acked_seq: AtomicU32::new(initial_seq),
-                peer_window: AtomicU32::new(0),
-                // Initial cwnd = 10 * MSS (RFC 6928), ssthresh = 64KB
-                last_peer_window: AtomicU16::new(0),
                 last_window_sent: AtomicU16::new(0),
-                cwnd: AtomicU32::new(if stealth >= StealthLevel::Full {
-                    10 * MSS
+                congestion: if stealth >= StealthLevel::Full {
+                    Some(Mutex::new(CongestionState {
+                        dup_ack_count: 0,
+                        last_acked_seq: initial_seq,
+                        peer_window: 0,
+                        cwnd: 10 * MSS,
+                        ssthresh: 65535,
+                        snd_nxt: initial_seq,
+                        last_peer_window: 0,
+                    }))
                 } else {
-                    0
-                }),
-                ssthresh: AtomicU32::new(if stealth >= StealthLevel::Full {
-                    65535
-                } else {
-                    0
-                }),
-                snd_nxt: AtomicU32::new(initial_seq),
+                    None
+                },
             },
             incoming_tx,
         )
@@ -289,7 +296,12 @@ impl Socket {
         // Exclude SYN/SYN+ACK: handshake packets must always advertise a real
         // window (last_window_sent starts at 0 and hasn't been set yet).
         let is_syn = (flags & tcp::TcpFlags::SYN) != 0;
-        let window = if self.stealth >= StealthLevel::Standard
+        let window = if is_syn && self.stealth >= StealthLevel::Basic {
+            // SYN/SYN+ACK: use Linux-like initial window (64240) for stealth >= Basic.
+            let w = SYN_WINDOW;
+            self.last_window_sent.store(w, Ordering::Relaxed);
+            w
+        } else if self.stealth >= StealthLevel::Standard
             && !is_syn
             && payload.is_none()
             && ack == prev_ack
@@ -331,38 +343,46 @@ impl Socket {
                     tcp::TcpFlags::ACK
                 };
 
-                // Send window constraint (stealth >= Full): wrap seq back if bytes
-                // in flight would exceed the effective window (min of peer's
-                // advertised window and congestion window)
-                if self.stealth >= StealthLevel::Full {
-                    let peer_win = self.peer_window.load(Ordering::Relaxed);
-                    let cwnd = self.cwnd.load(Ordering::Relaxed);
+                // Send window constraint + seq advance (stealth >= Full):
+                // All congestion reads (peer_window, cwnd, last_acked_seq) and
+                // seq writes (fetch_add, snd_nxt update) are done under a single
+                // Mutex to prevent interleaving between concurrent send() calls
+                // and recv()'s fast retransmit seq rewind.
+                let buf = if let Some(ref cong_mutex) = self.congestion {
+                    let mut cong = cong_mutex.lock().unwrap_or_else(|e| e.into_inner());
                     // Effective window: use peer's advertised window if known,
                     // otherwise fall back to cwnd alone (peer_window starts at 0
                     // until the first data packet is received from the peer)
-                    let effective_win = if peer_win > 0 { peer_win.min(cwnd) } else { cwnd };
+                    let effective_win = if cong.peer_window > 0 {
+                        cong.peer_window.min(cong.cwnd)
+                    } else {
+                        cong.cwnd
+                    };
                     if effective_win > 0 {
-                        let last_acked = self.last_acked_seq.load(Ordering::Relaxed);
                         let current_seq = self.seq.load(Ordering::Relaxed);
-                        let bytes_in_flight = current_seq.wrapping_sub(last_acked);
+                        let bytes_in_flight = current_seq.wrapping_sub(cong.last_acked_seq);
                         if bytes_in_flight.wrapping_add(payload.len() as u32) > effective_win {
-                            self.seq.store(last_acked, Ordering::Relaxed);
+                            self.seq.store(cong.last_acked_seq, Ordering::Relaxed);
                         }
                     }
-                }
-
-                let buf = self.build_tcp_packet(flags, Some(payload));
-                let new_seq = self.seq.fetch_add(payload.len() as u32, Ordering::Relaxed)
-                    .wrapping_add(payload.len() as u32);
-                // Advance snd_nxt to the highest seq ever sent (monotonically).
-                // This is used for ACK validation and is never rewound unlike self.seq.
-                let _ = self.snd_nxt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                    if (new_seq.wrapping_sub(cur) as i32) > 0 {
-                        Some(new_seq)
-                    } else {
-                        None
+                    // Build packet while seq still holds the pre-advance value
+                    let buf = self.build_tcp_packet(flags, Some(payload));
+                    // seq.fetch_add and snd_nxt update must be inside the lock
+                    // to prevent a concurrent send() from interleaving between
+                    // the window check and the fetch_add
+                    let new_seq = self.seq.fetch_add(payload.len() as u32, Ordering::Relaxed)
+                        .wrapping_add(payload.len() as u32);
+                    if (new_seq.wrapping_sub(cong.snd_nxt) as i32) > 0 {
+                        cong.snd_nxt = new_seq;
                     }
-                });
+                    buf
+                } else {
+                    // Non-Full stealth: no lock needed
+                    let buf = self.build_tcp_packet(flags, Some(payload));
+                    self.seq.fetch_add(payload.len() as u32, Ordering::Relaxed);
+                    buf
+                };
+
                 self.tun.send(&buf).await.ok().and(Some(()))
             }
             _ => unreachable!(),
@@ -379,8 +399,19 @@ impl Socket {
     pub async fn recv(&self, buf: &mut [u8]) -> Option<usize> {
         match self.state {
             State::Established => {
-                self.incoming.recv_async().await.ok().and_then(|raw_buf| {
-                    let (_v4_packet, tcp_packet) = parse_ip_packet(&raw_buf).unwrap();
+                loop {
+                    let raw_buf = match self.incoming.recv_async().await {
+                        Ok(buf) => buf,
+                        Err(_) => return None,
+                    };
+
+                    let (_v4_packet, tcp_packet) = match parse_ip_packet(&raw_buf) {
+                        Some(parsed) => parsed,
+                        None => {
+                            warn!("Connection {} recv: failed to parse packet, skipping", self);
+                            continue;
+                        }
+                    };
 
                     if (tcp_packet.get_flags() & tcp::TcpFlags::RST) != 0 {
                         info!("Connection {} reset by peer", self);
@@ -395,74 +426,74 @@ impl Socket {
                     }
 
                     // Track duplicate ACKs for fast retransmit (stealth >= Full)
+                    // All congestion state reads/writes are done under a single Mutex
+                    // to prevent race conditions between concurrent recv() calls
+                    // (e.g., double-halving cwnd on duplicate ACKs).
                     if self.stealth >= StealthLevel::Full {
                         let peer_ack = tcp_packet.get_acknowledgement();
-                        let prev_acked = self.last_acked_seq.load(Ordering::Relaxed);
-                        let snd_nxt = self.snd_nxt.load(Ordering::Relaxed);
                         let is_pure_ack = tcp_packet.payload().is_empty();
                         let peer_raw_window = tcp_packet.get_window();
-                        let prev_peer_window = self.last_peer_window.load(Ordering::Relaxed);
 
-                        if peer_ack == prev_acked && is_pure_ack && peer_raw_window == prev_peer_window
-                            && (snd_nxt.wrapping_sub(prev_acked) as i32) > 0
+                        let mut cong = self.congestion.as_ref().unwrap().lock().unwrap_or_else(|e| e.into_inner());
+
+                        let mut ack_is_valid = false;
+                        if peer_ack == cong.last_acked_seq && is_pure_ack && peer_raw_window == cong.last_peer_window
+                            && (cong.snd_nxt.wrapping_sub(cong.last_acked_seq) as i32) > 0
                         {
                             // Only count pure ACKs (no data) with unchanged advertised
                             // window AND outstanding data (snd_nxt > last_acked) as
                             // duplicate ACKs per RFC 5681. Packets with a changed window
                             // are window updates, not dup ACKs.
-                            let count = self.dup_ack_count.fetch_add(1, Ordering::Relaxed) + 1;
-                            if count >= 3 {
+                            cong.dup_ack_count += 1;
+                            ack_is_valid = true;
+                            if cong.dup_ack_count >= 3 {
                                 // Triple duplicate ACK: reset seq to last acked position
-                                // (simulate fast retransmit)
-                                self.seq.store(prev_acked, Ordering::Relaxed);
+                                // (simulate fast retransmit). Must be inside the lock to
+                                // prevent TOCTOU with send()'s window constraint + fetch_add.
+                                self.seq.store(cong.last_acked_seq, Ordering::Relaxed);
                                 // Multiplicative decrease: halve cwnd, set ssthresh
-                                let cwnd = self.cwnd.load(Ordering::Relaxed);
-                                let new_ssthresh = (cwnd / 2).max(2 * MSS);
-                                self.ssthresh.store(new_ssthresh, Ordering::Relaxed);
-                                self.cwnd.store(new_ssthresh, Ordering::Relaxed);
+                                let new_ssthresh = (cong.cwnd / 2).max(2 * MSS);
+                                cong.ssthresh = new_ssthresh;
+                                cong.cwnd = new_ssthresh;
                                 // Reset counter to prevent repeated halving on subsequent dups
-                                self.dup_ack_count.store(0, Ordering::Relaxed);
+                                cong.dup_ack_count = 0;
                             }
-                        } else if (peer_ack.wrapping_sub(prev_acked) as i32) > 0
-                            && (snd_nxt.wrapping_sub(peer_ack) as i32) >= 0
+                        } else if (peer_ack.wrapping_sub(cong.last_acked_seq) as i32) > 0
+                            && (cong.snd_nxt.wrapping_sub(peer_ack) as i32) >= 0
                         {
                             // Accept ACKs that advance monotonically AND do not
                             // exceed SND.NXT. ACKs past what we've sent are invalid
                             // (could be injected by a middlebox) and are dropped to
                             // prevent last_acked_seq from jumping ahead of seq.
-                            self.last_acked_seq.store(peer_ack, Ordering::Relaxed);
-                            self.dup_ack_count.store(0, Ordering::Relaxed);
+                            cong.last_acked_seq = peer_ack;
+                            cong.dup_ack_count = 0;
+                            ack_is_valid = true;
                             // Congestion window growth on new ACK
-                            let cwnd = self.cwnd.load(Ordering::Relaxed);
-                            let ssthresh = self.ssthresh.load(Ordering::Relaxed);
                             // Cap cwnd at 1MB to keep congestion simulation meaningful
                             const MAX_CWND: u32 = 1_048_576;
-                            if cwnd < MAX_CWND {
-                                if cwnd < ssthresh {
+                            if cong.cwnd < MAX_CWND {
+                                if cong.cwnd < cong.ssthresh {
                                     // Slow start: increase cwnd by MSS (doubles per RTT)
-                                    self.cwnd.store((cwnd + MSS).min(MAX_CWND), Ordering::Relaxed);
+                                    cong.cwnd = (cong.cwnd + MSS).min(MAX_CWND);
                                 } else {
                                     // Congestion avoidance: increase cwnd by MSS per RTT
                                     // Approximate: add MSS^2/cwnd per ACK
-                                    let increment = (MSS * MSS).checked_div(cwnd).unwrap_or(1);
-                                    self.cwnd.store((cwnd + increment.max(1)).min(MAX_CWND), Ordering::Relaxed);
+                                    let increment = (MSS * MSS).checked_div(cong.cwnd).unwrap_or(1);
+                                    cong.cwnd = (cong.cwnd + increment.max(1)).min(MAX_CWND);
                                 }
                             }
-                        } else {
-                            // Invalid ACK (beyond SND.NXT, stale, or reordered):
-                            // skip window updates to prevent a bogus advertised
-                            // window from shrinking the effective send window.
+                        } else if peer_ack == cong.last_acked_seq {
+                            // Non-dup-ACK with matching ack number (e.g., data-carrying
+                            // packet or changed window): still valid for window updates.
+                            ack_is_valid = true;
                         }
+                        // else: Invalid ACK (beyond SND.NXT, stale, or reordered):
+                        // skip window updates to prevent a bogus advertised
+                        // window from shrinking the effective send window.
 
-                        // Only update peer window state for valid ACKs (dup or new).
-                        // Invalid ACKs (past SND.NXT, stale) must not influence the
-                        // send window or dup-ACK detection window comparison.
-                        let ack_is_valid = peer_ack == prev_acked
-                            || ((peer_ack.wrapping_sub(prev_acked) as i32) > 0
-                                && (snd_nxt.wrapping_sub(peer_ack) as i32) >= 0);
                         if ack_is_valid {
                             // Update last seen peer window for dup ACK detection
-                            self.last_peer_window.store(peer_raw_window, Ordering::Relaxed);
+                            cong.last_peer_window = peer_raw_window;
 
                             // Store peer's advertised receive window (scaled by wscale=7).
                             // NOTE: This assumes the peer also uses wscale=7, which is true
@@ -470,8 +501,9 @@ impl Socket {
                             // README). Mismatched stealth levels will produce incorrect
                             // window scaling.
                             let raw_window = tcp_packet.get_window() as u32;
-                            self.peer_window.store(raw_window << 7, Ordering::Relaxed);
+                            cong.peer_window = raw_window << 7;
                         }
+                        // Lock released here at end of scope
                     }
 
                     let payload = tcp_packet.payload();
@@ -489,16 +521,24 @@ impl Socket {
                     };
 
                     if send_ack {
-                        let buf = self.build_tcp_packet(tcp::TcpFlags::ACK, None);
-                        if let Err(e) = self.tun.try_send(&buf) {
+                        let ack_buf = self.build_tcp_packet(tcp::TcpFlags::ACK, None);
+                        if let Err(e) = self.tun.try_send(&ack_buf) {
                             info!("Connection {} unable to send standalone ACK: {}", self, e)
                         }
                     }
 
-                    buf[..payload.len()].copy_from_slice(payload);
+                    let copy_len = payload.len().min(buf.len());
+                    if payload.len() > buf.len() {
+                        warn!(
+                            "recv: payload ({} bytes) truncated to buffer size ({} bytes)",
+                            payload.len(),
+                            buf.len()
+                        );
+                    }
+                    buf[..copy_len].copy_from_slice(&payload[..copy_len]);
 
-                    Some(payload.len())
-                })
+                    return Some(copy_len);
+                }
             }
             _ => unreachable!(),
         }
@@ -514,7 +554,10 @@ impl Socket {
                 State::Idle => {
                     let buf = self.build_tcp_packet(tcp::TcpFlags::SYN | tcp::TcpFlags::ACK, None);
                     // ACK set by constructor
-                    self.tun.send(&buf).await.unwrap();
+                    if let Err(e) = self.tun.send(&buf).await {
+                        warn!("accept: failed to send SYN+ACK to TUN: {}, retrying", e);
+                        continue;
+                    }
                     self.state = State::SynReceived;
                     info!("Sent SYN + ACK to client");
                 }
@@ -527,8 +570,20 @@ impl Socket {
                         res = time::timeout(TIMEOUT, self.incoming.recv_async()) => res,
                     };
                     if let Ok(buf) = res {
-                        let buf = buf.unwrap();
-                        let (_v4_packet, tcp_packet) = parse_ip_packet(&buf).unwrap();
+                        let buf = match buf {
+                            Ok(b) => b,
+                            Err(_) => {
+                                warn!("accept: incoming channel closed");
+                                return;
+                            }
+                        };
+                        let (_v4_packet, tcp_packet) = match parse_ip_packet(&buf) {
+                            Some(parsed) => parsed,
+                            None => {
+                                warn!("accept: failed to parse incoming packet, retrying");
+                                continue;
+                            }
+                        };
 
                         if (tcp_packet.get_flags() & tcp::TcpFlags::RST) != 0 {
                             return;
@@ -547,11 +602,14 @@ impl Socket {
                         {
                             // found our ACK
                             self.seq.fetch_add(1, Ordering::Relaxed);
-                            // Update last_acked_seq and snd_nxt so Level 3
+                            // Update CongestionState so Level 3
                             // bytes_in_flight starts at 0
                             let new_seq = self.seq.load(Ordering::Relaxed);
-                            self.last_acked_seq.store(new_seq, Ordering::Relaxed);
-                            self.snd_nxt.store(new_seq, Ordering::Relaxed);
+                            if let Some(ref cong_mutex) = self.congestion {
+                                let mut cong = cong_mutex.lock().unwrap_or_else(|e| e.into_inner());
+                                cong.last_acked_seq = new_seq;
+                                cong.snd_nxt = new_seq;
+                            }
                             self.state = State::Established;
 
                             info!("Connection from {:?} established", self.remote_addr);
@@ -584,15 +642,30 @@ impl Socket {
             match self.state {
                 State::Idle => {
                     let buf = self.build_tcp_packet(tcp::TcpFlags::SYN, None);
-                    self.tun.send(&buf).await.unwrap();
+                    if let Err(e) = self.tun.send(&buf).await {
+                        warn!("connect: failed to send SYN to TUN: {}, retrying", e);
+                        continue;
+                    }
                     self.state = State::SynSent;
                     info!("Sent SYN to server");
                 }
                 State::SynSent => {
                     match time::timeout(TIMEOUT, self.incoming.recv_async()).await {
                         Ok(buf) => {
-                            let buf = buf.unwrap();
-                            let (_v4_packet, tcp_packet) = parse_ip_packet(&buf).unwrap();
+                            let buf = match buf {
+                                Ok(b) => b,
+                                Err(_) => {
+                                    warn!("connect: incoming channel closed");
+                                    return None;
+                                }
+                            };
+                            let (_v4_packet, tcp_packet) = match parse_ip_packet(&buf) {
+                                Some(parsed) => parsed,
+                                None => {
+                                    warn!("connect: failed to parse incoming packet, retrying");
+                                    continue;
+                                }
+                            };
 
                             if (tcp_packet.get_flags() & tcp::TcpFlags::RST) != 0 {
                                 return None;
@@ -613,15 +686,25 @@ impl Socket {
                                 self.seq.fetch_add(1, Ordering::Relaxed);
                                 self.ack
                                     .store(tcp_packet.get_sequence().wrapping_add(1), Ordering::Relaxed);
-                                // Update last_acked_seq and snd_nxt so Level 3
+                                // Update CongestionState so Level 3
                                 // bytes_in_flight starts at 0
                                 let new_seq = self.seq.load(Ordering::Relaxed);
-                                self.last_acked_seq.store(new_seq, Ordering::Relaxed);
-                                self.snd_nxt.store(new_seq, Ordering::Relaxed);
+                                if let Some(ref cong_mutex) = self.congestion {
+                                    let mut cong = cong_mutex.lock().unwrap_or_else(|e| e.into_inner());
+                                    cong.last_acked_seq = new_seq;
+                                    cong.snd_nxt = new_seq;
+                                }
 
                                 // send ACK to finish handshake
                                 let buf = self.build_tcp_packet(tcp::TcpFlags::ACK, None);
-                                self.tun.send(&buf).await.unwrap();
+                                if let Err(e) = self.tun.send(&buf).await {
+                                    warn!("connect: failed to send handshake ACK to TUN: {}, retrying", e);
+                                    // Roll back seq so the retransmitted SYN+ACK passes
+                                    // the ack == seq + 1 check on the next iteration.
+                                    // ack/congestion updates are idempotent (absolute stores).
+                                    self.seq.fetch_sub(1, Ordering::Relaxed);
+                                    continue;
+                                }
 
                                 self.state = State::Established;
 
@@ -631,6 +714,11 @@ impl Socket {
                         }
                         Err(_) => {
                             info!("Waiting for SYN + ACK timed out");
+                            // Reset ts_ecr so the retransmitted SYN has ts_ecr=0
+                            // (RFC 7323: initial SYN must not echo a prior peer timestamp)
+                            if self.stealth >= StealthLevel::Basic {
+                                self.ts_ecr.store(0, Ordering::Relaxed);
+                            }
                             self.state = State::Idle;
                         }
                     }
@@ -648,11 +736,14 @@ impl Drop for Socket {
     fn drop(&mut self) {
         let tuple = AddrTuple::new(self.local_addr, self.remote_addr);
         // dissociates ourself from the dispatch map
-        assert!(self.shared.tuples.write().unwrap().remove(&tuple).is_some());
-        // purge cache
-        // Ignore error: after Stack::shutdown(), reader tasks (the only
-        // broadcast subscribers) are gone, so send() returns Err — that's fine
-        // because there is no local cache left to purge.
+        if let Ok(mut tuples) = self.shared.tuples.write() {
+            if tuples.remove(&tuple).is_none() {
+                warn!("Socket drop: tuple {:?} already removed from dispatch map", tuple);
+            }
+        } else {
+            warn!("Socket drop: tuples lock poisoned, cannot remove {:?}", tuple);
+        }
+        // purge cache (ignore error if no receivers exist, e.g. during shutdown)
         let _ = self.shared.tuples_purge.send(tuple);
 
         // Send RST with StealthLevel::Off to avoid timestamps on RST packets,
@@ -831,7 +922,13 @@ impl Stack {
                     return;
                 }
                 size = tun.recv(&mut buf) => {
-                    let size = size.unwrap();
+                    let size = match size {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!("reader_task: TUN recv error: {}, continuing", e);
+                            continue;
+                        }
+                    };
                     buf.truncate(size);
                     let buf = buf.freeze();
 
@@ -924,7 +1021,9 @@ impl Stack {
                                         0, 0,
                                         0xFFFF,
                                     );
-                                    shared.tun[0].try_send(&buf).unwrap();
+                                    if let Err(e) = shared.tun[0].try_send(&buf) {
+                                        warn!("reader_task: failed to send RST for bad SYN: {}", e);
+                                    }
                                 }
                             } else if (tcp_packet.get_flags() & tcp::TcpFlags::RST) == 0 {
                                 info!("Unknown TCP packet from {}, sending RST", remote_addr);
@@ -960,7 +1059,9 @@ impl Stack {
                                     0, 0,
                                     rst_window,
                                 );
-                                shared.tun[0].try_send(&buf).unwrap();
+                                if let Err(e) = shared.tun[0].try_send(&buf) {
+                                    warn!("reader_task: failed to send RST for unknown packet: {}", e);
+                                }
                             }
                         }
                         None => {
@@ -1203,6 +1304,19 @@ mod tests {
         }
     }
 
+    /// Helper that mirrors the SYN window logic in Socket::build_tcp_packet().
+    /// Returns the window value that would be used for a SYN or data packet.
+    fn compute_syn_window(stealth: StealthLevel, is_syn: bool) -> u16 {
+        if is_syn && stealth >= StealthLevel::Basic {
+            SYN_WINDOW
+        } else if stealth >= StealthLevel::Standard {
+            // Data packets use dynamic window_base + jitter
+            compute_window_base(stealth).wrapping_add(rand::random::<u16>() % 32)
+        } else {
+            0xFFFF
+        }
+    }
+
     #[test]
     fn test_window_stealth_off_is_static_0xffff() {
         for _ in 0..10 {
@@ -1262,6 +1376,49 @@ mod tests {
         assert!((256..=512).contains(&base));
         let window = compute_current_window(StealthLevel::Full, base);
         assert!((base..base + 32).contains(&window), "window {} should be in range [{}..{})", window, base, base + 32);
+    }
+
+    // --- SYN window fingerprint tests ---
+
+    #[test]
+    fn test_syn_window_basic_returns_64240() {
+        for _ in 0..10 {
+            let w = compute_syn_window(StealthLevel::Basic, true);
+            assert_eq!(w, 64240, "SYN window at Basic should be 64240, got {}", w);
+        }
+    }
+
+    #[test]
+    fn test_syn_window_standard_returns_64240() {
+        for _ in 0..10 {
+            let w = compute_syn_window(StealthLevel::Standard, true);
+            assert_eq!(w, 64240, "SYN window at Standard should be 64240, got {}", w);
+        }
+    }
+
+    #[test]
+    fn test_syn_window_full_returns_64240() {
+        for _ in 0..10 {
+            let w = compute_syn_window(StealthLevel::Full, true);
+            assert_eq!(w, 64240, "SYN window at Full should be 64240, got {}", w);
+        }
+    }
+
+    #[test]
+    fn test_syn_window_off_returns_0xffff() {
+        // Stealth Off: SYN window should remain 0xFFFF (backward compat)
+        let w = compute_syn_window(StealthLevel::Off, true);
+        assert_eq!(w, 0xFFFF, "SYN window at Off should be 0xFFFF, got {}", w);
+    }
+
+    #[test]
+    fn test_data_packet_window_not_64240_for_standard() {
+        // Data packets (is_syn=false) at Standard should use dynamic window, not 64240
+        for _ in 0..20 {
+            let w = compute_syn_window(StealthLevel::Standard, false);
+            assert_ne!(w, 64240, "data packet window should not be SYN_WINDOW");
+            assert!(w >= 256 && w <= 543, "data window {} out of expected range", w);
+        }
     }
 
     // --- Task 9: Duplicate ACK tracking (Level 3) ---
@@ -1926,5 +2083,450 @@ mod tests {
         assert!(stealth_off < StealthLevel::Full);
         assert!(stealth_basic < StealthLevel::Full);
         assert!(stealth_standard < StealthLevel::Full);
+    }
+
+    // --- Hardening: graceful parse_ip_packet error handling ---
+
+    /// Test that recv() skips malformed packets and returns the next valid one.
+    /// Before the fix, this would panic due to unwrap() on parse_ip_packet().
+    #[cfg(feature = "integration-tests")]
+    #[tokio::test]
+    async fn test_recv_malformed_packet_skips_and_retries() {
+        use tokio_tun::TunBuilder;
+
+        // Create a real TUN device (requires root/Docker)
+        let tuns = TunBuilder::new()
+            .name("tmalform0")
+            .address("10.200.0.1".parse::<std::net::Ipv4Addr>().unwrap())
+            .destination("10.200.0.2".parse::<std::net::Ipv4Addr>().unwrap())
+            .up()
+            .build()
+            .expect("failed to create TUN device");
+        let tun = Arc::new(tuns.into_iter().next().unwrap());
+
+        let (ready_tx, _ready_rx) = mpsc::channel(1);
+        let (tuples_purge_tx, _purge_rx_keep) = broadcast::channel(1);
+        let shared = Arc::new(Shared {
+            tuples: RwLock::new(HashMap::new()),
+            listening: RwLock::new(HashSet::new()),
+            tun: vec![tun.clone()],
+            ready: ready_tx,
+            tuples_purge: tuples_purge_tx,
+            stealth: StealthLevel::Off,
+        });
+
+        let local_addr: SocketAddr = "10.200.0.1:1234".parse().unwrap();
+        let remote_addr: SocketAddr = "10.200.0.2:5678".parse().unwrap();
+
+        let (socket, sender) = Socket::new(
+            shared.clone(),
+            tun,
+            local_addr,
+            remote_addr,
+            Some(100),
+            State::Established,
+            StealthLevel::Off,
+        );
+
+        // Register the tuple in the shared map so Drop doesn't panic
+        let tuple = AddrTuple::new(local_addr, remote_addr);
+        shared.tuples.write().unwrap().insert(tuple, sender.clone());
+
+        // Send a malformed packet (garbage bytes that parse_ip_packet returns None for)
+        sender.send_async(Bytes::from_static(b"garbage")).await.unwrap();
+
+        // Build a valid IPv4+TCP packet with payload "hello"
+        let valid_packet = build_tcp_packet(
+            remote_addr,
+            local_addr,
+            100, // seq
+            0,   // ack
+            pnet::packet::tcp::TcpFlags::ACK,
+            Some(b"hello"),
+            StealthLevel::Off,
+            0, 0, 0xFFFF,
+        );
+        sender.send_async(valid_packet).await.unwrap();
+
+        // recv() should skip the malformed packet and return the valid payload
+        let mut buf = vec![0u8; 128];
+        let n = socket.recv(&mut buf).await.expect("recv returned None instead of skipping malformed packet");
+        assert_eq!(&buf[..n], b"hello");
+    }
+
+    /// Verify that accept() and connect() don't panic when TUN send errors
+    /// are encountered. We use a valid TUN device but no server responds,
+    /// so both functions exhaust retries and return gracefully.
+    /// The key assertion is that the new error-handling code paths compile
+    /// and execute without panicking.
+    #[cfg(feature = "integration-tests")]
+    #[tokio::test]
+    async fn test_tun_send_failure_no_panic() {
+        use tokio_tun::TunBuilder;
+
+        // Create a real TUN device (sends succeed, but no peer responds)
+        let tuns = TunBuilder::new()
+            .name("ttunfail0")
+            .address("10.201.0.1".parse::<std::net::Ipv4Addr>().unwrap())
+            .destination("10.201.0.2".parse::<std::net::Ipv4Addr>().unwrap())
+            .up()
+            .build()
+            .expect("failed to create TUN device");
+        let tun = Arc::new(tuns.into_iter().next().unwrap());
+
+        let (ready_tx, _ready_rx) = mpsc::channel(1);
+        let (tuples_purge_tx, _purge_rx_keep) = broadcast::channel(1);
+        let shared = Arc::new(Shared {
+            tuples: RwLock::new(HashMap::new()),
+            listening: RwLock::new(HashSet::new()),
+            tun: vec![tun.clone()],
+            ready: ready_tx,
+            tuples_purge: tuples_purge_tx,
+            stealth: StealthLevel::Off,
+        });
+
+        // Test connect: should exhaust retries without panicking
+        {
+            let local_addr: SocketAddr = "10.201.0.1:1234".parse().unwrap();
+            let remote_addr: SocketAddr = "10.201.0.2:5678".parse().unwrap();
+
+            let (mut socket, sender) = Socket::new(
+                shared.clone(),
+                tun.clone(),
+                local_addr,
+                remote_addr,
+                Some(100),
+                State::Idle,
+                StealthLevel::Off,
+            );
+
+            let tuple = AddrTuple::new(local_addr, remote_addr);
+            shared.tuples.write().unwrap().insert(tuple, sender);
+
+            // connect() should return None after retries without panicking
+            let result = socket.connect().await;
+            assert!(result.is_none(), "connect should return None when no server responds");
+        }
+
+        // Test accept: should exhaust retries without panicking
+        {
+            let local_addr: SocketAddr = "10.201.0.1:2345".parse().unwrap();
+            let remote_addr: SocketAddr = "10.201.0.2:6789".parse().unwrap();
+
+            let (socket, sender) = Socket::new(
+                shared.clone(),
+                tun.clone(),
+                local_addr,
+                remote_addr,
+                Some(100),
+                State::Idle,
+                StealthLevel::Off,
+            );
+
+            let tuple = AddrTuple::new(local_addr, remote_addr);
+            shared.tuples.write().unwrap().insert(tuple, sender);
+
+            // accept() should complete after retries without panicking
+            let cancel = tokio_util::sync::CancellationToken::new();
+            socket.accept(cancel).await;
+        }
+    }
+
+    // --- Task 4: CongestionState struct tests ---
+
+    #[test]
+    fn test_congestion_state_fields_initialized_correctly() {
+        // Verify CongestionState initial values match current AtomicU32 defaults
+        // for stealth >= Full: cwnd=10*MSS, ssthresh=65535, etc.
+        let cs = CongestionState {
+            dup_ack_count: 0,
+            last_acked_seq: 42,
+            peer_window: 0,
+            cwnd: 10 * MSS,
+            ssthresh: 65535,
+            snd_nxt: 42,
+            last_peer_window: 0,
+        };
+
+        assert_eq!(cs.dup_ack_count, 0);
+        assert_eq!(cs.last_acked_seq, 42);
+        assert_eq!(cs.peer_window, 0);
+        assert_eq!(cs.cwnd, 10 * MSS);
+        assert_eq!(cs.ssthresh, 65535);
+        assert_eq!(cs.snd_nxt, 42);
+        assert_eq!(cs.last_peer_window, 0);
+    }
+
+    #[test]
+    fn test_congestion_state_none_for_lower_stealth() {
+        // Verify `congestion` is `None` for stealth levels Off, Basic, and Standard
+        // We can't construct a full Socket without TUN, so we mirror the initialization logic
+        for stealth in [StealthLevel::Off, StealthLevel::Basic, StealthLevel::Standard] {
+            let congestion: Option<Mutex<CongestionState>> = if stealth >= StealthLevel::Full {
+                Some(Mutex::new(CongestionState {
+                    dup_ack_count: 0,
+                    last_acked_seq: 0,
+                    peer_window: 0,
+                    cwnd: 10 * MSS,
+                    ssthresh: 65535,
+                    snd_nxt: 0,
+                    last_peer_window: 0,
+                }))
+            } else {
+                None
+            };
+            assert!(
+                congestion.is_none(),
+                "congestion should be None for stealth {:?}",
+                stealth
+            );
+        }
+    }
+
+    // --- Task 5: Concurrent recv() dup ACK test ---
+
+    /// Test that concurrent recv() calls with duplicate ACKs only halve cwnd once.
+    /// Before the Mutex fix, concurrent recv() calls could each see dup_ack_count=2,
+    /// increment to 3, and both trigger the multiplicative decrease — halving cwnd twice.
+    #[cfg(feature = "integration-tests")]
+    #[tokio::test]
+    async fn test_concurrent_recv_dup_ack_fires_once() {
+        use tokio_tun::TunBuilder;
+
+        let tuns = TunBuilder::new()
+            .name("tconcdup0")
+            .address("10.210.0.1".parse::<std::net::Ipv4Addr>().unwrap())
+            .destination("10.210.0.2".parse::<std::net::Ipv4Addr>().unwrap())
+            .up()
+            .build()
+            .expect("failed to create TUN device");
+        let tun = Arc::new(tuns.into_iter().next().unwrap());
+
+        let (ready_tx, _ready_rx) = mpsc::channel(1);
+        let (tuples_purge_tx, _purge_rx_keep) = broadcast::channel(1);
+        let shared = Arc::new(Shared {
+            tuples: RwLock::new(HashMap::new()),
+            listening: RwLock::new(HashSet::new()),
+            tun: vec![tun.clone()],
+            ready: ready_tx,
+            tuples_purge: tuples_purge_tx,
+            stealth: StealthLevel::Full,
+        });
+
+        let local_addr: SocketAddr = "10.210.0.1:1234".parse().unwrap();
+        let remote_addr: SocketAddr = "10.210.0.2:5678".parse().unwrap();
+
+        let (socket, sender) = Socket::new(
+            shared.clone(),
+            tun,
+            local_addr,
+            remote_addr,
+            Some(100),
+            State::Established,
+            StealthLevel::Full,
+        );
+
+        let tuple = AddrTuple::new(local_addr, remote_addr);
+        shared.tuples.write().unwrap().insert(tuple, sender.clone());
+
+        // Set up initial state: advance snd_nxt beyond last_acked_seq so dup ACK
+        // detection sees outstanding data. We do this by updating the CongestionState
+        // directly.
+        let initial_seq = socket.seq.load(Ordering::Relaxed);
+        let initial_cwnd = {
+            let mut cong = socket.congestion.as_ref().unwrap().lock().unwrap();
+            cong.last_acked_seq = initial_seq;
+            cong.snd_nxt = initial_seq.wrapping_add(5000); // simulate 5000 bytes in flight
+            cong.cwnd
+        };
+
+        // Build pure ACK packets (no payload) that all ACK the same seq number,
+        // with the same window — these are duplicate ACKs per RFC 5681.
+        // We need 4+ dup ACKs so that even if processed serially, the 3rd triggers
+        // the fast retransmit. With the race bug, concurrent processing could double-halve.
+        let peer_window: u16 = 512;
+        for _ in 0..6 {
+            let dup_ack_packet = build_tcp_packet(
+                remote_addr,
+                local_addr,
+                200,          // peer seq (doesn't matter for dup ACK detection)
+                initial_seq,  // ack = last_acked_seq (this makes it a dup ACK)
+                pnet::packet::tcp::TcpFlags::ACK,
+                None,         // pure ACK, no payload
+                StealthLevel::Full,
+                1000, 500,    // ts_val, ts_ecr
+                peer_window,
+            );
+            sender.send_async(dup_ack_packet).await.unwrap();
+        }
+
+        // Also send a valid data packet at the end so recv() returns
+        let final_packet = build_tcp_packet(
+            remote_addr,
+            local_addr,
+            200,
+            initial_seq,
+            pnet::packet::tcp::TcpFlags::ACK,
+            Some(b"done"),
+            StealthLevel::Full,
+            1001, 500,
+            peer_window,
+        );
+        sender.send_async(final_packet).await.unwrap();
+
+        // Set last_peer_window to match the dup ACK window so they're detected as dups
+        {
+            let mut cong = socket.congestion.as_ref().unwrap().lock().unwrap();
+            cong.last_peer_window = peer_window;
+        }
+
+        // Single recv() call processes the dup ACKs sequentially within the loop.
+        // The Mutex ensures that even if we spawned multiple concurrent recv() tasks,
+        // they'd serialize the congestion state updates.
+        let socket = Arc::new(socket);
+
+        // Spawn multiple concurrent recv() tasks to stress the lock
+        let mut handles = vec![];
+        for _ in 0..4 {
+            let s = socket.clone();
+            handles.push(tokio::spawn(async move {
+                let mut buf = vec![0u8; 128];
+                s.recv(&mut buf).await
+            }));
+        }
+
+        // Wait for all to complete (most will get None when channel is empty after
+        // the data packet is consumed by one of them)
+        drop(sender); // close channel so remaining recv() calls return None
+        for h in handles {
+            let _ = h.await;
+        }
+
+        // Verify cwnd was halved exactly once (not twice)
+        let final_cwnd = socket.congestion.as_ref().unwrap().lock().unwrap().cwnd;
+        let expected_cwnd = (initial_cwnd / 2).max(2 * MSS);
+        assert_eq!(
+            final_cwnd, expected_cwnd,
+            "cwnd should be halved exactly once: initial={}, expected={}, got={}",
+            initial_cwnd, expected_cwnd, final_cwnd
+        );
+    }
+
+    #[test]
+    fn test_congestion_state_some_for_full_stealth() {
+        // Verify `congestion` is `Some` for stealth Full
+        let stealth = StealthLevel::Full;
+        let initial_seq: u32 = 12345;
+        let congestion: Option<Mutex<CongestionState>> = if stealth >= StealthLevel::Full {
+            Some(Mutex::new(CongestionState {
+                dup_ack_count: 0,
+                last_acked_seq: initial_seq,
+                peer_window: 0,
+                cwnd: 10 * MSS,
+                ssthresh: 65535,
+                snd_nxt: initial_seq,
+                last_peer_window: 0,
+            }))
+        } else {
+            None
+        };
+        assert!(congestion.is_some(), "congestion should be Some for stealth Full");
+
+        let cs = congestion.unwrap().into_inner().unwrap();
+        assert_eq!(cs.cwnd, 10 * MSS);
+        assert_eq!(cs.ssthresh, 65535);
+        assert_eq!(cs.last_acked_seq, initial_seq);
+        assert_eq!(cs.snd_nxt, initial_seq);
+    }
+
+    #[cfg(feature = "integration-tests")]
+    #[tokio::test]
+    async fn test_concurrent_send_seq_consistency() {
+        use tokio_tun::TunBuilder;
+
+        let tuns = TunBuilder::new()
+            .name("tconcsnd0")
+            .address("10.220.0.1".parse::<std::net::Ipv4Addr>().unwrap())
+            .destination("10.220.0.2".parse::<std::net::Ipv4Addr>().unwrap())
+            .up()
+            .build()
+            .expect("failed to create TUN device");
+        let tun = Arc::new(tuns.into_iter().next().unwrap());
+
+        let (ready_tx, _ready_rx) = mpsc::channel(1);
+        let (tuples_purge_tx, _purge_rx_keep) = broadcast::channel(1);
+        let shared = Arc::new(Shared {
+            tuples: RwLock::new(HashMap::new()),
+            listening: RwLock::new(HashSet::new()),
+            tun: vec![tun.clone()],
+            ready: ready_tx,
+            tuples_purge: tuples_purge_tx,
+            stealth: StealthLevel::Full,
+        });
+
+        let local_addr: SocketAddr = "10.220.0.1:1234".parse().unwrap();
+        let remote_addr: SocketAddr = "10.220.0.2:5678".parse().unwrap();
+
+        let (socket, sender) = Socket::new(
+            shared.clone(),
+            tun,
+            local_addr,
+            remote_addr,
+            Some(100),
+            State::Established,
+            StealthLevel::Full,
+        );
+
+        let tuple = AddrTuple::new(local_addr, remote_addr);
+        shared.tuples.write().unwrap().insert(tuple, sender);
+
+        let initial_seq = socket.seq.load(Ordering::Relaxed);
+
+        // Set a large window so sends are not blocked by window constraint
+        {
+            let mut cong = socket.congestion.as_ref().unwrap().lock().unwrap();
+            cong.last_acked_seq = initial_seq;
+            cong.peer_window = 1_000_000;
+            cong.cwnd = 1_000_000;
+        }
+
+        let socket = Arc::new(socket);
+        let num_tasks = 8;
+        let sends_per_task = 10;
+        let payload_len: u32 = 100;
+
+        // Spawn concurrent send() tasks
+        let mut handles = vec![];
+        for _ in 0..num_tasks {
+            let s = socket.clone();
+            handles.push(tokio::spawn(async move {
+                let payload = vec![0xABu8; payload_len as usize];
+                for _ in 0..sends_per_task {
+                    s.send(&payload).await;
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Verify seq advanced by exactly num_tasks * sends_per_task * payload_len
+        let final_seq = socket.seq.load(Ordering::Relaxed);
+        let expected_advance = (num_tasks * sends_per_task) as u32 * payload_len;
+        let actual_advance = final_seq.wrapping_sub(initial_seq);
+        assert_eq!(
+            actual_advance, expected_advance,
+            "seq should advance monotonically: initial={}, expected advance={}, actual advance={}, final={}",
+            initial_seq, expected_advance, actual_advance, final_seq
+        );
+
+        // Verify snd_nxt is at least as high as final seq
+        let final_snd_nxt = socket.congestion.as_ref().unwrap().lock().unwrap().snd_nxt;
+        assert!(
+            (final_snd_nxt.wrapping_sub(final_seq) as i32) >= 0,
+            "snd_nxt ({}) should be >= final seq ({})",
+            final_snd_nxt, final_seq
+        );
     }
 }

@@ -215,11 +215,23 @@ pub fn parse_ip_packet(buf: &Bytes) -> Option<(IPPacket<'_>, tcp::TcpPacket<'_>)
     let version = (*buf.first()?) >> 4;
     if version == 4 {
         let v4 = ipv4::Ipv4Packet::new(buf)?;
+        if v4.get_header_length() < 5 {
+            return None;
+        }
         if v4.get_next_level_protocol() != ip::IpNextHeaderProtocols::Tcp {
             return None;
         }
 
-        let tcp = tcp::TcpPacket::new(buf.get(IPV4_HEADER_LEN..)?)?;
+        let tcp_offset = (v4.get_header_length() as usize) * 4;
+        let total_length = v4.get_total_length() as usize;
+        // Reject packets where the declared IP total_length is too short to
+        // contain even the IP header + minimum TCP header, or exceeds the
+        // buffer.  Slice within total_length so trailing bytes beyond the IP
+        // datagram are not fed to the TCP parser.
+        if total_length < tcp_offset + TCP_HEADER_LEN || total_length > buf.len() {
+            return None;
+        }
+        let tcp = tcp::TcpPacket::new(buf.get(tcp_offset..total_length)?)?;
         Some((IPPacket::V4(v4), tcp))
     } else if version == 6 {
         let v6 = ipv6::Ipv6Packet::new(buf)?;
@@ -227,7 +239,14 @@ pub fn parse_ip_packet(buf: &Bytes) -> Option<(IPPacket<'_>, tcp::TcpPacket<'_>)
             return None;
         }
 
-        let tcp = tcp::TcpPacket::new(buf.get(IPV6_HEADER_LEN..)?)?;
+        let payload_len = v6.get_payload_length() as usize;
+        // Reject packets where payload_length is too short for a TCP header
+        // or extends beyond the buffer. Slice within payload_length so
+        // trailing bytes beyond the IPv6 datagram are not fed to the TCP parser.
+        if payload_len < TCP_HEADER_LEN || IPV6_HEADER_LEN + payload_len > buf.len() {
+            return None;
+        }
+        let tcp = tcp::TcpPacket::new(buf.get(IPV6_HEADER_LEN..IPV6_HEADER_LEN + payload_len)?)?;
         Some((IPPacket::V6(v6), tcp))
     } else {
         None
@@ -615,6 +634,155 @@ mod tests {
         buf[9] = 6;    // TCP
         let bytes = Bytes::copy_from_slice(&buf);
         assert!(parse_ip_packet(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_parse_returns_none_on_ipv6_too_short_for_tcp() {
+        // 40-byte IPv6 header with next_header=TCP but no TCP payload
+        let mut buf = vec![0u8; 40];
+        buf[0] = 0x60; // version=6
+        buf[4] = 0;    // payload_length high byte
+        buf[5] = 0;    // payload_length = 0 (no room for TCP)
+        buf[6] = 6;    // next_header = TCP
+        buf[7] = 64;   // hop limit
+        let bytes = Bytes::copy_from_slice(&buf);
+        assert!(parse_ip_packet(&bytes).is_none(), "IPv6 with payload_length=0 should return None");
+    }
+
+    #[test]
+    fn test_parse_returns_none_on_ipv6_payload_length_exceeds_buffer() {
+        // IPv6 header claiming payload_length=100 but buffer only has 60 bytes total
+        let mut buf = vec![0u8; 60];
+        buf[0] = 0x60; // version=6
+        buf[4] = 0;    // payload_length high byte
+        buf[5] = 100;  // payload_length = 100 (exceeds buffer)
+        buf[6] = 6;    // next_header = TCP
+        buf[7] = 64;   // hop limit
+        let bytes = Bytes::copy_from_slice(&buf);
+        assert!(parse_ip_packet(&bytes).is_none(), "IPv6 with payload_length exceeding buffer should return None");
+    }
+
+    #[test]
+    fn test_parse_ip_packet_with_ip_options() {
+        // IPv4 packet with IHL=6 (24-byte header: 20 standard + 4 bytes options)
+        // followed by a valid TCP header
+        let ip_hdr_len = 24usize;
+        let tcp_hdr_len = 20usize;
+        let total_len = ip_hdr_len + tcp_hdr_len;
+        let mut buf = vec![0u8; total_len];
+
+        // IPv4 header
+        buf[0] = 0x46; // version=4, IHL=6
+        buf[1] = 0;    // DSCP/ECN
+        buf[2] = (total_len >> 8) as u8;
+        buf[3] = (total_len & 0xff) as u8;
+        buf[8] = 64;   // TTL
+        buf[9] = 6;    // protocol = TCP
+        // src IP: 10.0.0.1
+        buf[12] = 10; buf[13] = 0; buf[14] = 0; buf[15] = 1;
+        // dst IP: 10.0.0.2
+        buf[16] = 10; buf[17] = 0; buf[18] = 0; buf[19] = 2;
+        // IP options (4 bytes of NOP padding)
+        buf[20] = 0x01; buf[21] = 0x01; buf[22] = 0x01; buf[23] = 0x01;
+
+        // TCP header starts at offset 24
+        // src port = 1234
+        buf[ip_hdr_len] = (1234u16 >> 8) as u8;
+        buf[ip_hdr_len + 1] = (1234u16 & 0xff) as u8;
+        // dst port = 5678
+        buf[ip_hdr_len + 2] = (5678u16 >> 8) as u8;
+        buf[ip_hdr_len + 3] = (5678u16 & 0xff) as u8;
+        // data offset = 5 (20 bytes)
+        buf[ip_hdr_len + 12] = 0x50;
+
+        // Compute IP checksum
+        let mut csum = Checksum::new();
+        csum.add_bytes(&buf[..ip_hdr_len]);
+        let ip_csum = csum.checksum();
+        buf[10] = ip_csum[0];
+        buf[11] = ip_csum[1];
+
+        let bytes = Bytes::copy_from_slice(&buf);
+        let result = parse_ip_packet(&bytes);
+        assert!(result.is_some(), "should parse IPv4 packet with IHL=6 (IP options present)");
+        let (ip_pkt, tcp_pkt) = result.unwrap();
+        match ip_pkt {
+            IPPacket::V4(v4) => {
+                assert_eq!(v4.get_header_length(), 6);
+                assert_eq!(v4.get_source(), "10.0.0.1".parse::<std::net::Ipv4Addr>().unwrap());
+            }
+            _ => panic!("expected IPv4"),
+        }
+        assert_eq!(tcp_pkt.get_source(), 1234);
+        assert_eq!(tcp_pkt.get_destination(), 5678);
+    }
+
+    #[test]
+    fn test_parse_ip_packet_with_max_ihl() {
+        // IPv4 packet with IHL=15 (60-byte header: 20 standard + 40 bytes options)
+        // followed by a valid TCP header
+        let ip_hdr_len = 60usize;
+        let tcp_hdr_len = 20usize;
+        let total_len = ip_hdr_len + tcp_hdr_len;
+        let mut buf = vec![0u8; total_len];
+
+        // IPv4 header
+        buf[0] = 0x4F; // version=4, IHL=15
+        buf[2] = (total_len >> 8) as u8;
+        buf[3] = (total_len & 0xff) as u8;
+        buf[8] = 64;   // TTL
+        buf[9] = 6;    // protocol = TCP
+        // src IP: 10.0.0.1
+        buf[12] = 10; buf[13] = 0; buf[14] = 0; buf[15] = 1;
+        // dst IP: 10.0.0.2
+        buf[16] = 10; buf[17] = 0; buf[18] = 0; buf[19] = 2;
+        // 40 bytes of NOP options (bytes 20..59)
+        for i in 20..60 {
+            buf[i] = 0x01;
+        }
+
+        // TCP header starts at offset 60
+        buf[ip_hdr_len] = (4321u16 >> 8) as u8;
+        buf[ip_hdr_len + 1] = (4321u16 & 0xff) as u8;
+        buf[ip_hdr_len + 2] = (8765u16 >> 8) as u8;
+        buf[ip_hdr_len + 3] = (8765u16 & 0xff) as u8;
+        buf[ip_hdr_len + 12] = 0x50;
+
+        // Compute IP checksum
+        let mut csum = Checksum::new();
+        csum.add_bytes(&buf[..ip_hdr_len]);
+        let ip_csum = csum.checksum();
+        buf[10] = ip_csum[0];
+        buf[11] = ip_csum[1];
+
+        let bytes = Bytes::copy_from_slice(&buf);
+        let result = parse_ip_packet(&bytes);
+        assert!(result.is_some(), "should parse IPv4 packet with IHL=15 (max IP options)");
+        let (_, tcp_pkt) = result.unwrap();
+        assert_eq!(tcp_pkt.get_source(), 4321);
+        assert_eq!(tcp_pkt.get_destination(), 8765);
+    }
+
+    #[test]
+    fn test_parse_ip_packet_with_ihl_below_minimum() {
+        // IPv4 packet with IHL=3 (malformed — minimum valid is 5)
+        // Should return None gracefully
+        let mut buf = vec![0u8; 40];
+        buf[0] = 0x43; // version=4, IHL=3
+        buf[8] = 64;   // TTL
+        buf[9] = 6;    // protocol = TCP
+        let bytes = Bytes::copy_from_slice(&buf);
+        assert!(parse_ip_packet(&bytes).is_none(), "IHL < 5 should return None");
+
+        // Also test IHL=0 (extreme malformed case)
+        buf[0] = 0x40; // version=4, IHL=0
+        let bytes = Bytes::copy_from_slice(&buf);
+        assert!(parse_ip_packet(&bytes).is_none(), "IHL=0 should return None");
+
+        // IHL=4 (still below minimum of 5)
+        buf[0] = 0x44; // version=4, IHL=4
+        let bytes = Bytes::copy_from_slice(&buf);
+        assert!(parse_ip_packet(&bytes).is_none(), "IHL=4 should return None");
     }
 
     // --- Task 3 (stealth plan): Realistic SYN fingerprint tests ---
