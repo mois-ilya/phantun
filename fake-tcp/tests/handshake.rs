@@ -43,6 +43,10 @@ async fn test_connect_accept_established() {
         .expect("recv returned None (unexpected RST)");
 
     assert_eq!(&buf[..n], payload as &[u8]);
+
+    drop(client_sock);
+    drop(server_sock);
+    env.shutdown().await;
 }
 
 /// Test: server rejects SYN with seq != 0 (current behavior snapshot).
@@ -104,6 +108,8 @@ async fn test_server_rejects_nonzero_seq_syn() {
         54321,
         "RST destination port must match the crafted SYN source port"
     );
+
+    env.shutdown().await;
 }
 
 /// Test: dropping a Socket sends RST to the peer.
@@ -139,4 +145,7 @@ async fn test_rst_on_socket_drop() {
         result.is_none(),
         "expected recv to return None after client RST, got Some"
     );
+
+    drop(server_sock);
+    env.shutdown().await;
 }

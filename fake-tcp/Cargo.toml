@@ -12,7 +12,6 @@ packet oriented tunneling with minimum overhead.
 """
 
 [features]
-benchmark = []
 integration-tests = ["nix"]
 
 [dependencies]
@@ -23,5 +22,18 @@ internet-checksum = "0"
 tokio-tun = "0"
 flume = "0"
 tokio = { workspace = true }
+tokio-util = "0.7"
 log = { workspace = true }
 nix = { version = "0.30", features = ["sched"], optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "packet_construction"
+harness = false
+
+[[bench]]
+name = "throughput"
+harness = false
+required-features = ["integration-tests"]

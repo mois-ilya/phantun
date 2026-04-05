@@ -41,7 +41,7 @@ async fn connected_pair() -> (fake_tcp::Socket, fake_tcp::Socket, common::TestEn
 /// intact, and that both sides are in Established state after the handshake.
 #[tokio::test]
 async fn test_send_client_to_server() {
-    let (client_sock, server_sock, _env) = connected_pair().await;
+    let (client_sock, server_sock, mut env) = connected_pair().await;
 
     let payload = b"hello from client";
     client_sock.send(payload).await.expect("client send failed");
@@ -53,6 +53,10 @@ async fn test_send_client_to_server() {
         .expect("server recv returned None (unexpected RST)");
 
     assert_eq!(&buf[..n], payload as &[u8]);
+
+    drop(client_sock);
+    drop(server_sock);
+    env.shutdown().await;
 }
 
 /// Test: send data server → client, verify received correctly.
@@ -60,7 +64,7 @@ async fn test_send_client_to_server() {
 /// Mirrors `test_send_client_to_server` in the reverse direction.
 #[tokio::test]
 async fn test_send_server_to_client() {
-    let (client_sock, server_sock, _env) = connected_pair().await;
+    let (client_sock, server_sock, mut env) = connected_pair().await;
 
     let payload = b"hello from server";
     server_sock.send(payload).await.expect("server send failed");
@@ -72,6 +76,10 @@ async fn test_send_server_to_client() {
         .expect("client recv returned None (unexpected RST)");
 
     assert_eq!(&buf[..n], payload as &[u8]);
+
+    drop(client_sock);
+    drop(server_sock);
+    env.shutdown().await;
 }
 
 /// Test: seq increments by payload.len() after each send.
@@ -86,7 +94,7 @@ async fn test_send_server_to_client() {
 /// raw packet capture, which is deferred to wire-fingerprint tests.
 #[tokio::test]
 async fn test_seq_increments_by_payload_len() {
-    let (client_sock, server_sock, _env) = connected_pair().await;
+    let (client_sock, server_sock, mut env) = connected_pair().await;
 
     // Send two payloads of known sizes.
     // Post-handshake: client seq = 1.
@@ -111,6 +119,10 @@ async fn test_seq_increments_by_payload_len() {
         .expect("second recv timed out")
         .expect("second recv returned None");
     assert_eq!(&buf2[..n2], second as &[u8], "second payload mismatch");
+
+    drop(client_sock);
+    drop(server_sock);
+    env.shutdown().await;
 }
 
 /// Test: ack updates to remote_seq + payload.len() after recv.
@@ -127,7 +139,7 @@ async fn test_seq_increments_by_payload_len() {
 /// require raw packet capture.
 #[tokio::test]
 async fn test_ack_updates_after_recv() {
-    let (client_sock, server_sock, _env) = connected_pair().await;
+    let (client_sock, server_sock, mut env) = connected_pair().await;
 
     // Client sends; server recvs → server ack = 1 + payload.len().
     let payload = b"ack-update-test";
@@ -152,6 +164,10 @@ async fn test_ack_updates_after_recv() {
         .expect("client recv timed out")
         .expect("client recv returned None");
     assert_eq!(&buf2[..n2], reply as &[u8], "client received wrong reply");
+
+    drop(client_sock);
+    drop(server_sock);
+    env.shutdown().await;
 }
 
 /// Test: multiple sequential sends accumulate seq correctly.
@@ -164,7 +180,7 @@ async fn test_ack_updates_after_recv() {
 /// so this test verifies data flow rather than seq arithmetic on the wire.
 #[tokio::test]
 async fn test_multiple_sequential_sends_accumulate_seq() {
-    let (client_sock, server_sock, _env) = connected_pair().await;
+    let (client_sock, server_sock, mut env) = connected_pair().await;
 
     let payloads: &[&[u8]] = &[
         b"first-payload",
@@ -188,4 +204,8 @@ async fn test_multiple_sequential_sends_accumulate_seq() {
             .expect("recv returned None");
         assert_eq!(&buf[..n], *expected, "payload mismatch");
     }
+
+    drop(client_sock);
+    drop(server_sock);
+    env.shutdown().await;
 }
