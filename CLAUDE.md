@@ -50,14 +50,15 @@ git config core.hooksPath .githooks
 ## Architecture
 
 - **`fake-tcp/`** — Core library. Userspace TCP stack over TUN interface.
-  - `lib.rs` — `Stack` (connection manager), `Socket` (per-connection async I/O), `StealthLevel` enum
-  - `packet.rs` — TCP/IP packet construction/parsing (IPv4 + IPv6), `TcpBuildOptions` for stealth params
+  - `lib.rs` — `Stack` (connection manager), `Socket` (per-connection async I/O), `StealthLevel` enum, `MimicProfile` (fingerprint config)
+  - `packet.rs` — TCP/IP packet construction/parsing (IPv4 + IPv6), `TcpBuildOptions` for stealth params, `MimicParams` for per-packet mimic overrides
   - `testing.rs` — Integration test helpers (`TestEnv`, netns/TUN setup), feature-gated behind `integration-tests`
   - `benches/` — Criterion benchmarks: `packet_construction` (per-level microbench), `throughput` (TUN tunnel data transfer, requires `integration-tests` feature)
 - **`scripts/`** — Runner scripts: `run-tests.sh` (test suite), `run-benchmarks.sh` (benchmarks). Auto-detect Docker vs native environment.
 - **`phantun/`** — Client and server binaries
   - `src/bin/client.rs` — Listens UDP, tunnels through fake-TCP to server
   - `src/bin/server.rs` — Accepts fake-TCP, forwards to backend UDP
+  - `src/mimic.rs` — Mimic mode CLI argument definitions (`add_mimic_args`, `build_mimic_profile`)
   - `src/utils.rs` — Socket helpers (SO_REUSEPORT, IPv6 netlink, pktinfo)
 
 ## Code Conventions

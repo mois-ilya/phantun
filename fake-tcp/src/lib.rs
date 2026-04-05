@@ -390,6 +390,7 @@ impl Socket {
                     .as_ref()
                     .map(|c| c.fetch_add(1, Ordering::Relaxed))
                     .unwrap_or(0),
+                ip_id_incrementing: profile.ip_id_incrementing,
                 wscale: Some(profile.wscale),
             }
         });
@@ -585,13 +586,13 @@ impl Socket {
                             // Update last seen peer window for dup ACK detection
                             cong.last_peer_window = peer_raw_window;
 
-                            // Store peer's advertised receive window (scaled by wscale=7).
-                            // NOTE: This assumes the peer also uses wscale=7, which is true
-                            // when both sides run the same stealth level (as documented in
-                            // README). Mismatched stealth levels will produce incorrect
-                            // window scaling.
+                            // Store peer's advertised receive window (scaled by negotiated wscale).
+                            // NOTE: This assumes the peer uses the same wscale, which is true
+                            // when both sides run the same stealth/mimic settings (as documented
+                            // in README). Mismatched settings will produce incorrect window scaling.
                             let raw_window = tcp_packet.get_window() as u32;
-                            cong.peer_window = raw_window << 7;
+                            let wscale = self.mimic.as_ref().map_or(7u32, |m| m.wscale as u32);
+                            cong.peer_window = raw_window << wscale;
                         }
                         // Lock released here at end of scope
                     }
@@ -1079,7 +1080,7 @@ impl Stack {
                                     .contains(&tcp_packet.get_destination())
                             {
                                 // SYN seen on listening socket
-                                if shared.stealth >= StealthLevel::Basic || tcp_packet.get_sequence() == 0 {
+                                if shared.stealth >= StealthLevel::Basic || shared.mimic.is_some() || tcp_packet.get_sequence() == 0 {
                                     let (sock, incoming) = Socket::new(
                                         shared.clone(),
                                         tun.clone(),
@@ -2836,6 +2837,7 @@ mod tests {
         let mimic = Some(profile);
         let mimic_params = mimic.as_ref().map(|p| MimicParams {
             ip_id: 0,
+            ip_id_incrementing: p.ip_id_incrementing,
             wscale: Some(p.wscale),
         });
         assert!(mimic_params.is_some());
@@ -2848,6 +2850,7 @@ mod tests {
         let mimic: Option<MimicProfile> = None;
         let mimic_params = mimic.as_ref().map(|p| MimicParams {
             ip_id: 0,
+            ip_id_incrementing: p.ip_id_incrementing,
             wscale: Some(p.wscale),
         });
         assert!(mimic_params.is_none());

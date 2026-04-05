@@ -412,8 +412,10 @@ interface MTU of 1500.
 
 Please note **Phantun can not function correctly if
 the packet size exceeds that of the link MTU**, as Phantun do not perform any IP-fragmentation
-and reassymbly. For the same reason, Phantun always sets the `DF` (Don't Fragment) bit
-in the IP header to prevent intermidiate devices performing any fragmentation on the packet.
+and reassymbly. For the same reason, Phantun sets the `DF` (Don't Fragment) bit
+in the IP header by default to prevent intermidiate devices performing any fragmentation on the packet.
+Note: when using `--mimic udp2raw`, the DF flag is cleared to match udp2raw's fingerprint;
+ensure your MTU is configured correctly to avoid fragmentation.
 
 It is also *strongly recommended* to use the same interface
 MTU for both ends of a WireGuard tunnel, or unexpected packet loss may occur and these issues are

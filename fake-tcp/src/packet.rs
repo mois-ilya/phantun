@@ -9,8 +9,10 @@ use crate::StealthLevel;
 
 /// Per-packet mimic overrides, computed by Socket from MimicProfile + mutable state.
 pub struct MimicParams {
-    /// IPv4 identification field value (0 = use default behavior with DF)
+    /// IPv4 identification field value
     pub ip_id: u16,
+    /// Whether incrementing IP ID mode is active (controls DF flag independently of ip_id value)
+    pub ip_id_incrementing: bool,
     /// Window scale override for SYN packets (None = use stealth default)
     pub wscale: Option<u8>,
 }
@@ -90,10 +92,10 @@ pub fn build_tcp_packet(
             v4.set_source(*local.ip());
             v4.set_destination(*remote.ip());
             v4.set_total_length(total_len.try_into().unwrap());
-            // When mimic provides a non-zero ip_id, use incrementing ID and no DF
+            // When mimic has incrementing IP ID active, use the counter value and no DF
             // (matches udp2raw behavior). Otherwise use default: ID=0, DF=1.
             if let Some(mp) = mimic {
-                if mp.ip_id > 0 {
+                if mp.ip_id_incrementing {
                     v4.set_identification(mp.ip_id);
                     // No DF flag — udp2raw does not set DF
                 } else {
@@ -1594,7 +1596,7 @@ mod tests {
     fn test_ipv4_mimic_ip_id_zero_keeps_df() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let mp = MimicParams { ip_id: 0, wscale: None };
+        let mp = MimicParams { ip_id: 0, ip_id_incrementing: false, wscale: None };
         let pkt = build_tcp_packet(
             local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
             StealthLevel::Off, 0, 0, 0xFFFF, Some(&mp),
@@ -1605,10 +1607,27 @@ mod tests {
     }
 
     #[test]
+    fn test_ipv4_mimic_ip_id_zero_with_incrementing_clears_df() {
+        // Regression: when ip_id counter wraps to 0, DF should still be cleared
+        // because ip_id_incrementing is true (the counter just happened to wrap)
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let mp = MimicParams { ip_id: 0, ip_id_incrementing: true, wscale: None };
+        let pkt = build_tcp_packet(
+            local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
+            StealthLevel::Off, 0, 0, 0xFFFF, Some(&mp),
+        );
+        let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
+        assert_eq!(v4.get_identification(), 0, "ip_id=0 should still set ID=0");
+        assert_ne!(v4.get_flags(), ipv4::Ipv4Flags::DontFragment,
+            "ip_id_incrementing=true should clear DF even when ip_id wraps to 0");
+    }
+
+    #[test]
     fn test_ipv4_mimic_ip_id_nonzero_sets_id_clears_df() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let mp = MimicParams { ip_id: 42, wscale: None };
+        let mp = MimicParams { ip_id: 42, ip_id_incrementing: true, wscale: None };
         let pkt = build_tcp_packet(
             local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
             StealthLevel::Off, 0, 0, 0xFFFF, Some(&mp),
@@ -1622,7 +1641,7 @@ mod tests {
     fn test_ipv4_mimic_ip_id_large_value() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let mp = MimicParams { ip_id: 65535, wscale: None };
+        let mp = MimicParams { ip_id: 65535, ip_id_incrementing: true, wscale: None };
         let pkt = build_tcp_packet(
             local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
             StealthLevel::Off, 0, 0, 0xFFFF, Some(&mp),
@@ -1635,7 +1654,7 @@ mod tests {
     fn test_ipv6_mimic_ip_id_no_panic_no_change() {
         let local: SocketAddr = "[fd00::1]:9000".parse().unwrap();
         let remote: SocketAddr = "[fd00::2]:9001".parse().unwrap();
-        let mp = MimicParams { ip_id: 42, wscale: None };
+        let mp = MimicParams { ip_id: 42, ip_id_incrementing: true, wscale: None };
         // Should not panic — IPv6 has no identification field
         let pkt = build_tcp_packet(
             local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
@@ -1650,7 +1669,7 @@ mod tests {
     fn test_ipv4_mimic_ip_id_checksum_valid() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let mp = MimicParams { ip_id: 1000, wscale: None };
+        let mp = MimicParams { ip_id: 1000, ip_id_incrementing: true, wscale: None };
         let pkt = build_tcp_packet(
             local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"hello"),
             StealthLevel::Basic, 5000, 3000, 0xFFFF, Some(&mp),
@@ -1668,7 +1687,7 @@ mod tests {
         // SYN with stealth >= Basic and mimic wscale=5 should have wscale=5 at option offset 18
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let mp = MimicParams { ip_id: 0, wscale: Some(5) };
+        let mp = MimicParams { ip_id: 0, ip_id_incrementing: false, wscale: Some(5) };
         let pkt = build_tcp_packet(
             local, remote, 0, 0, tcp::TcpFlags::SYN, None,
             StealthLevel::Basic, 1000, 0, 41000, Some(&mp),
@@ -1688,7 +1707,7 @@ mod tests {
         // SYN with stealth >= Basic and mimic wscale=None should use default 7
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let mp = MimicParams { ip_id: 0, wscale: None };
+        let mp = MimicParams { ip_id: 0, ip_id_incrementing: false, wscale: None };
         let pkt = build_tcp_packet(
             local, remote, 0, 0, tcp::TcpFlags::SYN, None,
             StealthLevel::Basic, 1000, 0, 0xFFFF, Some(&mp),
@@ -1726,7 +1745,7 @@ mod tests {
         // Data packet with mimic window=41000 should have window=41000
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let mp = MimicParams { ip_id: 1, wscale: Some(5) };
+        let mp = MimicParams { ip_id: 1, ip_id_incrementing: true, wscale: Some(5) };
         let pkt = build_tcp_packet(
             local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
             StealthLevel::Standard, 5000, 3000, 41000, Some(&mp),
@@ -1740,7 +1759,7 @@ mod tests {
         // SYN packet with mimic window=41000 should have window=41000
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let mp = MimicParams { ip_id: 0, wscale: Some(5) };
+        let mp = MimicParams { ip_id: 0, ip_id_incrementing: false, wscale: Some(5) };
         let pkt = build_tcp_packet(
             local, remote, 0, 0, tcp::TcpFlags::SYN, None,
             StealthLevel::Standard, 1000, 0, 41000, Some(&mp),
