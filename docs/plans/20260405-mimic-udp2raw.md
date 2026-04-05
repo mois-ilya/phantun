@@ -108,12 +108,12 @@
 **Files:**
 - Modify: `fake-tcp/src/lib.rs`
 
-- [ ] In Socket's send path where flags are set: when mimic is active and `psh_always=false`, set ACK only (no PSH) — since phantun sends one UDP datagram per TCP segment, every segment is effectively "the last", so disabling PSH entirely matches udp2raw's behavior where PSH is not set on most data packets
-- [ ] When `psh_always=true` (mimic-no-psh toggle) or no mimic: use existing behavior (PSH on all data for stealth >= Basic, no PSH for Off)
-- [ ] Write unit tests: mimic with psh_always=false → data packets have ACK flag only, no PSH
-- [ ] Write unit tests: mimic with psh_always=true → data packets have PSH|ACK (same as stealth Basic+)
-- [ ] Write unit tests: without mimic, PSH behavior unchanged per stealth level
-- [ ] Run tests — must pass before next task
+- [x] In Socket's send path where flags are set: when mimic is active and `psh_always=false`, set ACK only (no PSH) — since phantun sends one UDP datagram per TCP segment, every segment is effectively "the last", so disabling PSH entirely matches udp2raw's behavior where PSH is not set on most data packets
+- [x] When `psh_always=true` (mimic-no-psh toggle) or no mimic: use existing behavior (PSH on all data for stealth >= Basic, no PSH for Off)
+- [x] Write unit tests: mimic with psh_always=false → data packets have ACK flag only, no PSH
+- [x] Write unit tests: mimic with psh_always=true → data packets have PSH|ACK (same as stealth Basic+)
+- [x] Write unit tests: without mimic, PSH behavior unchanged per stealth level
+- [x] Run tests — must pass before next task
 
 ### Task 5: CLI flags for --mimic and --mimic-no-* toggles
 

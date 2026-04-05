@@ -406,7 +406,15 @@ impl Socket {
     pub async fn send(&self, payload: &[u8]) -> Option<()> {
         match self.state {
             State::Established => {
-                let flags = if self.stealth >= StealthLevel::Basic {
+                let flags = if let Some(ref mimic) = self.mimic {
+                    if mimic.psh_always {
+                        // mimic-no-psh toggle: use stealth Basic+ behavior (PSH on all data)
+                        tcp::TcpFlags::PSH | tcp::TcpFlags::ACK
+                    } else {
+                        // udp2raw style: ACK only, no PSH on data packets
+                        tcp::TcpFlags::ACK
+                    }
+                } else if self.stealth >= StealthLevel::Basic {
                     tcp::TcpFlags::PSH | tcp::TcpFlags::ACK
                 } else {
                     tcp::TcpFlags::ACK
@@ -2830,6 +2838,85 @@ mod tests {
             wscale: Some(p.wscale),
         });
         assert!(mimic_params.is_none());
+    }
+
+    // --- Task 4: PSH flag behavior for mimic mode ---
+
+    /// Helper that mirrors the data-packet flag logic from Socket::send().
+    /// Returns the flags that would be used for a data packet given mimic + stealth.
+    fn compute_data_flags(mimic: &Option<MimicProfile>, stealth: StealthLevel) -> u8 {
+        if let Some(m) = mimic {
+            if m.psh_always {
+                tcp::TcpFlags::PSH | tcp::TcpFlags::ACK
+            } else {
+                tcp::TcpFlags::ACK
+            }
+        } else if stealth >= StealthLevel::Basic {
+            tcp::TcpFlags::PSH | tcp::TcpFlags::ACK
+        } else {
+            tcp::TcpFlags::ACK
+        }
+    }
+
+    #[test]
+    fn test_mimic_psh_always_false_data_flags_ack_only() {
+        // udp2raw style: psh_always=false → ACK only, no PSH
+        let mimic = Some(MimicProfile::udp2raw()); // psh_always=false
+        let flags = compute_data_flags(&mimic, StealthLevel::Standard);
+        assert_eq!(flags, tcp::TcpFlags::ACK, "mimic psh_always=false should produce ACK only");
+        assert_eq!(flags & tcp::TcpFlags::PSH, 0, "PSH flag must not be set");
+    }
+
+    #[test]
+    fn test_mimic_psh_always_true_data_flags_psh_ack() {
+        // mimic-no-psh toggle: psh_always=true → PSH|ACK (same as stealth Basic+)
+        let mut profile = MimicProfile::udp2raw();
+        profile.psh_always = true;
+        let mimic = Some(profile);
+        let flags = compute_data_flags(&mimic, StealthLevel::Standard);
+        assert_eq!(flags, tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
+            "mimic psh_always=true should produce PSH|ACK");
+    }
+
+    #[test]
+    fn test_no_mimic_stealth_basic_psh_ack() {
+        // Without mimic, stealth Basic+ → PSH|ACK
+        let flags = compute_data_flags(&None, StealthLevel::Basic);
+        assert_eq!(flags, tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
+            "stealth Basic without mimic should produce PSH|ACK");
+    }
+
+    #[test]
+    fn test_no_mimic_stealth_standard_psh_ack() {
+        let flags = compute_data_flags(&None, StealthLevel::Standard);
+        assert_eq!(flags, tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
+            "stealth Standard without mimic should produce PSH|ACK");
+    }
+
+    #[test]
+    fn test_no_mimic_stealth_full_psh_ack() {
+        let flags = compute_data_flags(&None, StealthLevel::Full);
+        assert_eq!(flags, tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
+            "stealth Full without mimic should produce PSH|ACK");
+    }
+
+    #[test]
+    fn test_no_mimic_stealth_off_ack_only() {
+        // Without mimic, stealth Off → ACK only (no PSH)
+        let flags = compute_data_flags(&None, StealthLevel::Off);
+        assert_eq!(flags, tcp::TcpFlags::ACK, "stealth Off without mimic should produce ACK only");
+        assert_eq!(flags & tcp::TcpFlags::PSH, 0, "PSH flag must not be set for stealth Off");
+    }
+
+    #[test]
+    fn test_mimic_psh_always_false_all_stealth_levels() {
+        // Regardless of stealth level, mimic psh_always=false → ACK only
+        let mimic = Some(MimicProfile::udp2raw());
+        for stealth in [StealthLevel::Off, StealthLevel::Basic, StealthLevel::Standard, StealthLevel::Full] {
+            let flags = compute_data_flags(&mimic, stealth);
+            assert_eq!(flags, tcp::TcpFlags::ACK,
+                "mimic psh_always=false should be ACK only regardless of stealth {:?}", stealth);
+        }
     }
 
     /// Verify Socket window_base and current_window() behavior with mimic profile.
