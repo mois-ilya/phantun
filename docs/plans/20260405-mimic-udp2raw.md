@@ -79,14 +79,14 @@
 - Modify: `fake-tcp/src/packet.rs`
 - Modify: `fake-tcp/src/lib.rs`
 
-- [ ] In `build_tcp_packet()`: when `MimicParams.ip_id > 0`, call `set_identification(ip_id)` on IPv4 packet and clear DF flag (udp2raw does not set DF); for IPv6 packets, ip_id is ignored (IPv6 has no ID field)
-- [ ] In Socket's `build_tcp_packet()` wrapper: if `ip_id_counter` is Some, `fetch_add(1, Relaxed)` and pass value in MimicParams; otherwise pass `ip_id: 0`
-- [ ] Initialize `ip_id_counter` with random starting value (like udp2raw) in Socket::new() when mimic has `ip_id_incrementing=true`
-- [ ] Write unit tests: IPv4 packet with ip_id=0 has ID=0 + DF flag set (existing behavior preserved)
-- [ ] Write unit tests: IPv4 packet with ip_id=N has ID=N, DF flag cleared
-- [ ] Write unit tests: IPv6 packet with mimic ip_id — no panic, ID field absent, no behavioral change
-- [ ] Write unit tests: AtomicU16 counter increments correctly across multiple sends, wraps at u16::MAX
-- [ ] Run tests — must pass before next task
+- [x] In `build_tcp_packet()`: when `MimicParams.ip_id > 0`, call `set_identification(ip_id)` on IPv4 packet and clear DF flag (udp2raw does not set DF); for IPv6 packets, ip_id is ignored (IPv6 has no ID field)
+- [x] In Socket's `build_tcp_packet()` wrapper: if `ip_id_counter` is Some, `fetch_add(1, Relaxed)` and pass value in MimicParams; otherwise pass `ip_id: 0`
+- [x] Initialize `ip_id_counter` with random starting value (like udp2raw) in Socket::new() when mimic has `ip_id_incrementing=true`
+- [x] Write unit tests: IPv4 packet with ip_id=0 has ID=0 + DF flag set (existing behavior preserved)
+- [x] Write unit tests: IPv4 packet with ip_id=N has ID=N, DF flag cleared
+- [x] Write unit tests: IPv6 packet with mimic ip_id — no panic, ID field absent, no behavioral change
+- [x] Write unit tests: AtomicU16 counter increments correctly across multiple sends, wraps at u16::MAX
+- [x] Run tests — must pass before next task
 
 ### Task 3: Configurable window scale and raw window
 

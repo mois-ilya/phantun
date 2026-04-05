@@ -211,10 +211,9 @@ pub struct Socket {
     /// `None` for stealth levels Off, Basic, and Standard.
     congestion: Option<Mutex<CongestionState>>,
     /// Immutable mimic fingerprint profile (None = no mimic active)
-    #[allow(dead_code)] // used in Tasks 2-4
+    #[allow(dead_code)] // used in Tasks 3-4
     mimic: Option<MimicProfile>,
     /// Per-socket incrementing IP ID counter (Some when mimic.ip_id_incrementing=true)
-    #[allow(dead_code)] // used in Task 2
     ip_id_counter: Option<AtomicU16>,
 }
 
@@ -362,6 +361,13 @@ impl Socket {
             w
         };
 
+        let mimic_params = self.ip_id_counter.as_ref().map(|counter| {
+            MimicParams {
+                ip_id: counter.fetch_add(1, Ordering::Relaxed),
+                wscale: None,
+            }
+        });
+
         build_tcp_packet(
             self.local_addr,
             self.remote_addr,
@@ -373,7 +379,7 @@ impl Socket {
             self.current_ts_val(),
             self.ts_ecr.load(Ordering::Relaxed),
             window,
-            None,
+            mimic_params.as_ref(),
         )
     }
 
@@ -2666,6 +2672,29 @@ mod tests {
             .ip_id_incrementing
             .then(|| AtomicU16::new(rand::random::<u16>()));
         assert!(counter.is_none());
+    }
+
+    #[test]
+    fn test_mimic_ip_id_counter_increments_and_wraps() {
+        let counter = AtomicU16::new(u16::MAX - 1);
+        let v0 = counter.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(v0, u16::MAX - 1);
+        let v1 = counter.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(v1, u16::MAX);
+        let v2 = counter.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(v2, 0, "should wrap around at u16::MAX");
+        let v3 = counter.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(v3, 1);
+    }
+
+    #[test]
+    fn test_mimic_ip_id_counter_sequential_values() {
+        let start = 100u16;
+        let counter = AtomicU16::new(start);
+        for i in 0..10 {
+            let val = counter.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(val, start + i);
+        }
     }
 
     /// Verify Socket fields are correctly initialized from MimicProfile.

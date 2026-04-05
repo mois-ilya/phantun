@@ -53,7 +53,7 @@ pub fn build_tcp_packet(
     ts_val: u32,
     ts_ecr: u32,
     window: u16,
-    _mimic: Option<&MimicParams>,
+    mimic: Option<&MimicParams>,
 ) -> Bytes {
     let ip_header_len = match local_addr {
         SocketAddr::V4(_) => IPV4_HEADER_LEN,
@@ -90,7 +90,18 @@ pub fn build_tcp_packet(
             v4.set_source(*local.ip());
             v4.set_destination(*remote.ip());
             v4.set_total_length(total_len.try_into().unwrap());
-            v4.set_flags(ipv4::Ipv4Flags::DontFragment);
+            // When mimic provides a non-zero ip_id, use incrementing ID and no DF
+            // (matches udp2raw behavior). Otherwise use default: ID=0, DF=1.
+            if let Some(mp) = mimic {
+                if mp.ip_id > 0 {
+                    v4.set_identification(mp.ip_id);
+                    // No DF flag — udp2raw does not set DF
+                } else {
+                    v4.set_flags(ipv4::Ipv4Flags::DontFragment);
+                }
+            } else {
+                v4.set_flags(ipv4::Ipv4Flags::DontFragment);
+            }
             let mut cksm = Checksum::new();
             cksm.add_bytes(v4.packet());
             v4.set_checksum(u16::from_be_bytes(cksm.checksum()));
@@ -1563,5 +1574,89 @@ mod tests {
         );
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         assert!(parse_tcp_timestamps(&tcp_pkt).is_none(), "stealth Off has no timestamps");
+    }
+
+    #[test]
+    fn test_ipv4_no_mimic_has_zero_id_and_df() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let pkt = build_tcp_packet(
+            local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
+            StealthLevel::Off, 0, 0, 0xFFFF, None,
+        );
+        let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
+        assert_eq!(v4.get_identification(), 0, "default IP ID should be 0");
+        assert_eq!(v4.get_flags(), ipv4::Ipv4Flags::DontFragment, "default should have DF");
+    }
+
+    #[test]
+    fn test_ipv4_mimic_ip_id_zero_keeps_df() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let mp = MimicParams { ip_id: 0, wscale: None };
+        let pkt = build_tcp_packet(
+            local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
+            StealthLevel::Off, 0, 0, 0xFFFF, Some(&mp),
+        );
+        let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
+        assert_eq!(v4.get_identification(), 0, "ip_id=0 should keep ID=0");
+        assert_eq!(v4.get_flags(), ipv4::Ipv4Flags::DontFragment, "ip_id=0 should keep DF");
+    }
+
+    #[test]
+    fn test_ipv4_mimic_ip_id_nonzero_sets_id_clears_df() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let mp = MimicParams { ip_id: 42, wscale: None };
+        let pkt = build_tcp_packet(
+            local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
+            StealthLevel::Off, 0, 0, 0xFFFF, Some(&mp),
+        );
+        let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
+        assert_eq!(v4.get_identification(), 42, "ip_id=42 should set ID=42");
+        assert_ne!(v4.get_flags(), ipv4::Ipv4Flags::DontFragment, "non-zero ip_id should clear DF");
+    }
+
+    #[test]
+    fn test_ipv4_mimic_ip_id_large_value() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let mp = MimicParams { ip_id: 65535, wscale: None };
+        let pkt = build_tcp_packet(
+            local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
+            StealthLevel::Off, 0, 0, 0xFFFF, Some(&mp),
+        );
+        let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
+        assert_eq!(v4.get_identification(), 65535);
+    }
+
+    #[test]
+    fn test_ipv6_mimic_ip_id_no_panic_no_change() {
+        let local: SocketAddr = "[fd00::1]:9000".parse().unwrap();
+        let remote: SocketAddr = "[fd00::2]:9001".parse().unwrap();
+        let mp = MimicParams { ip_id: 42, wscale: None };
+        // Should not panic — IPv6 has no identification field
+        let pkt = build_tcp_packet(
+            local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
+            StealthLevel::Off, 0, 0, 0xFFFF, Some(&mp),
+        );
+        // Verify packet is still valid IPv6
+        let (ip_pkt, _tcp_pkt) = parse_ip_packet(&pkt).unwrap();
+        assert!(matches!(ip_pkt, IPPacket::V6(_)));
+    }
+
+    #[test]
+    fn test_ipv4_mimic_ip_id_checksum_valid() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let mp = MimicParams { ip_id: 1000, wscale: None };
+        let pkt = build_tcp_packet(
+            local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"hello"),
+            StealthLevel::Basic, 5000, 3000, 0xFFFF, Some(&mp),
+        );
+        // Verify IP header checksum (first 20 bytes for standard IPv4 header)
+        let mut cksm = internet_checksum::Checksum::new();
+        cksm.add_bytes(&pkt[..IPV4_HEADER_LEN]);
+        assert_eq!(cksm.checksum(), [0, 0], "IP checksum should be valid");
     }
 }
