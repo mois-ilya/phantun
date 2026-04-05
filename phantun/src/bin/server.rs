@@ -2,6 +2,7 @@ use clap::{crate_version, Arg, ArgAction, Command};
 use fake_tcp::packet::MAX_PACKET_LEN;
 use fake_tcp::{Stack, StealthLevel};
 use log::{debug, error, info};
+use phantun::mimic::{add_mimic_args, build_mimic_profile};
 use phantun::utils::{assign_ipv6_address, new_udp_reuseport};
 use std::fs;
 use std::io;
@@ -19,7 +20,7 @@ use phantun::UDP_TTL;
 async fn main() -> io::Result<()> {
     pretty_env_logger::init();
 
-    let matches = Command::new("Phantun Server")
+    let cmd = Command::new("Phantun Server")
         .version(crate_version!())
         .author("Datong Sun (github.com/dndx)")
         .arg(
@@ -108,8 +109,9 @@ async fn main() -> io::Result<()> {
                 .value_name("LEVEL")
                 .help("Sets the stealth level (0-3). 0=off, 1=basic signatures, 2=stateful mimicry, 3=full simulation")
                 .default_value("0")
-        )
-        .get_matches();
+        );
+
+    let matches = add_mimic_args(cmd).get_matches();
 
     let local_port: u16 = matches
         .get_one::<String>("local")
@@ -160,6 +162,7 @@ async fn main() -> io::Result<()> {
         .parse::<u8>()
         .expect("bad stealth level")
         .into();
+    let mimic = build_mimic_profile(&matches);
 
     let num_cpus = num_cpus::get();
     info!("{} cores available", num_cpus);
@@ -180,7 +183,7 @@ async fn main() -> io::Result<()> {
     info!("Created TUN device {}", tun[0].name());
 
     //thread::sleep(time::Duration::from_secs(5));
-    let mut stack = Stack::new(tun, tun_local, tun_local6, stealth, None);
+    let mut stack = Stack::new(tun, tun_local, tun_local6, stealth, mimic);
     stack.listen(local_port);
     info!("Listening on {}", local_port);
 

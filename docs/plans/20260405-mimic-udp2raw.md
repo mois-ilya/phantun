@@ -121,14 +121,14 @@
 - Modify: `phantun/src/bin/client.rs`
 - Modify: `phantun/src/bin/server.rs`
 
-- [ ] Add `--mimic <PROFILE>` argument (currently only "udp2raw" accepted) to both client.rs and server.rs
-- [ ] Add toggle flags: `--mimic-no-ipid`, `--mimic-no-wscale`, `--mimic-no-psh`, `--mimic-no-window` — each requires `--mimic` to be set (use clap's `requires`)
-- [ ] Extract a `build_mimic_profile(matches: &ArgMatches) -> Option<MimicProfile>` helper function for testability
-- [ ] Parse flags: start with `MimicProfile::udp2raw()`, then apply each `--mimic-no-*` to disable corresponding feature
-- [ ] Pass `Option<MimicProfile>` to `Stack::new()` alongside stealth level
-- [ ] Write unit tests using `Command::try_get_matches_from()`: mimic alone, mimic with each toggle, mimic with all toggles
-- [ ] Write unit tests: `build_mimic_profile()` returns correct profile for each flag combination
-- [ ] Run tests — must pass before next task
+- [x] Add `--mimic <PROFILE>` argument (currently only "udp2raw" accepted) to both client.rs and server.rs
+- [x] Add toggle flags: `--mimic-no-ipid`, `--mimic-no-wscale`, `--mimic-no-psh`, `--mimic-no-window` — each requires `--mimic` to be set (use clap's `requires`)
+- [x] Extract a `build_mimic_profile(matches: &ArgMatches) -> Option<MimicProfile>` helper function for testability
+- [x] Parse flags: start with `MimicProfile::udp2raw()`, then apply each `--mimic-no-*` to disable corresponding feature
+- [x] Pass `Option<MimicProfile>` to `Stack::new()` alongside stealth level
+- [x] Write unit tests using `Command::try_get_matches_from()`: mimic alone, mimic with each toggle, mimic with all toggles
+- [x] Write unit tests: `build_mimic_profile()` returns correct profile for each flag combination
+- [x] Run tests — must pass before next task
 
 ### Task 6: Verify acceptance criteria
 

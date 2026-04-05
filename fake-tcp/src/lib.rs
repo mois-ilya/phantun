@@ -275,7 +275,12 @@ impl Socket {
                 },
                 ts_ecr: AtomicU32::new(0),
                 window_base: if let Some(ref m) = mimic {
-                    m.window_raw
+                    if m.window_raw > 0 {
+                        m.window_raw
+                    } else {
+                        // window_raw=0 means "use default" (set by --mimic-no-window)
+                        256 + (rand::random::<u16>() % 257)
+                    }
                 } else if effective_stealth >= StealthLevel::Standard {
                     // Random base window in range 256..=512, representing ~32K-64K
                     // effective receive window with wscale=7
@@ -325,10 +330,13 @@ impl Socket {
     /// For stealth >= Standard, adds small random jitter to window_base.
     /// For lower stealth levels, returns static 0xFFFF.
     fn current_window(&self) -> u16 {
-        if self.mimic.is_some() {
+        if let Some(ref m) = self.mimic
+            && m.window_raw > 0
+        {
             // Mimic mode: return static window_raw (no jitter), matching udp2raw
-            self.window_base
-        } else if self.stealth >= StealthLevel::Standard {
+            return self.window_base;
+        }
+        if self.stealth >= StealthLevel::Standard {
             // Add jitter of 0..32 to base window to simulate natural variation
             self.window_base.wrapping_add(rand::random::<u16>() % 32)
         } else {
@@ -348,8 +356,13 @@ impl Socket {
         // Exclude SYN/SYN+ACK: handshake packets must always advertise a real
         // window (last_window_sent starts at 0 and hasn't been set yet).
         let is_syn = (flags & tcp::TcpFlags::SYN) != 0;
-        let window = if is_syn && self.mimic.is_some() {
-            // Mimic mode: use profile's window_raw for SYN packets too
+        let window = if is_syn
+            && self
+                .mimic
+                .as_ref()
+                .is_some_and(|m| m.window_raw > 0)
+        {
+            // Mimic mode with active window override: use profile's window_raw for SYN packets too
             let w = self.window_base;
             self.last_window_sent.store(w, Ordering::Relaxed);
             w

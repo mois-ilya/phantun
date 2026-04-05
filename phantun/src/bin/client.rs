@@ -2,6 +2,7 @@ use clap::{crate_version, Arg, ArgAction, Command};
 use fake_tcp::packet::MAX_PACKET_LEN;
 use fake_tcp::{Socket, Stack, StealthLevel};
 use log::{debug, error, info};
+use phantun::mimic::{add_mimic_args, build_mimic_profile};
 use phantun::utils::{assign_ipv6_address, new_udp_reuseport, udp_recv_pktinfo};
 use std::collections::HashMap;
 use std::fs;
@@ -19,7 +20,7 @@ use phantun::UDP_TTL;
 async fn main() -> io::Result<()> {
     pretty_env_logger::init();
 
-    let matches = Command::new("Phantun Client")
+    let cmd = Command::new("Phantun Client")
         .version(crate_version!())
         .author("Datong Sun (github.com/dndx)")
         .arg(
@@ -108,8 +109,9 @@ async fn main() -> io::Result<()> {
                 .value_name("LEVEL")
                 .help("Sets the stealth level (0-3). 0=off, 1=basic signatures, 2=stateful mimicry, 3=full simulation")
                 .default_value("0")
-        )
-        .get_matches();
+        );
+
+    let matches = add_mimic_args(cmd).get_matches();
 
     let local_addr: SocketAddr = matches
         .get_one::<String>("local")
@@ -161,6 +163,7 @@ async fn main() -> io::Result<()> {
         .parse::<u8>()
         .expect("bad stealth level")
         .into();
+    let mimic = build_mimic_profile(&matches);
 
     let num_cpus = num_cpus::get();
     info!("{} cores available", num_cpus);
@@ -183,7 +186,7 @@ async fn main() -> io::Result<()> {
     let udp_sock = Arc::new(new_udp_reuseport(local_addr));
     let connections = Arc::new(RwLock::new(HashMap::<SocketAddr, Arc<Socket>>::new()));
 
-    let mut stack = Stack::new(tun, tun_peer, tun_peer6, stealth, None);
+    let mut stack = Stack::new(tun, tun_peer, tun_peer6, stealth, mimic);
 
     let main_loop = tokio::spawn(async move {
         let mut buf_r = [0u8; MAX_PACKET_LEN];
