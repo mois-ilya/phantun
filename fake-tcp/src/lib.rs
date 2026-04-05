@@ -2227,7 +2227,8 @@ mod tests {
             shared.tuples.write().unwrap().insert(tuple, sender);
 
             // accept() should complete after retries without panicking
-            socket.accept().await;
+            let cancel = tokio_util::sync::CancellationToken::new();
+            socket.accept(cancel).await;
         }
     }
 

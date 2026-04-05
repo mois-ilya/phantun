@@ -118,7 +118,7 @@ async fn test_server_rejects_nonzero_seq_syn() {
 /// and verify the TCP window field is 64240.
 #[tokio::test]
 async fn test_syn_ack_window_matches_linux_default() {
-    let mut env = common::setup_test_env_with_stealth(StealthLevel::Basic).await;
+    let mut env = common::setup_test_env_with_config(StealthLevel::Basic, 1).await;
     env.server_stack.listen(SERVER_PORT);
 
     let crafted_src: SocketAddr = "10.0.2.2:54322".parse().unwrap();
@@ -170,7 +170,7 @@ async fn test_syn_ack_window_matches_linux_default() {
 /// handshake uses 64240 for SYN windows).
 #[tokio::test]
 async fn test_data_exchange_at_standard_stealth() {
-    let mut env = common::setup_test_env_with_stealth(StealthLevel::Standard).await;
+    let mut env = common::setup_test_env_with_config(StealthLevel::Standard, 1).await;
     let server_addr: SocketAddr = format!("10.0.1.1:{SERVER_PORT}").parse().unwrap();
     env.server_stack.listen(SERVER_PORT);
 
