@@ -129,8 +129,6 @@ pub struct Socket {
     ts_offset: u32,
     /// Last received peer tsval, echoed back as ts_ecr
     ts_ecr: AtomicU32,
-    /// Base window value for dynamic window randomization
-    window_base: u16,
     /// Last window value we sent, reused for duplicate ACKs
     last_window_sent: AtomicU16,
 }
@@ -169,7 +167,6 @@ impl Socket {
                 ts_epoch: Instant::now(),
                 ts_offset: rand::random::<u32>(),
                 ts_ecr: AtomicU32::new(0),
-                window_base: WINDOW_BASE + (rand::random::<u16>() % WINDOW_JITTER),
                 last_window_sent: AtomicU16::new(0),
             },
             incoming_tx,
@@ -190,9 +187,9 @@ impl Socket {
     }
 
     /// Compute the current advertised window value.
-    /// Adds small random jitter to window_base to simulate natural variation.
+    /// Fresh random window per packet, matching udp2raw: 40960 + random % 512.
     fn current_window(&self) -> u16 {
-        self.window_base.wrapping_add(rand::random::<u16>() % 32)
+        WINDOW_BASE + (rand::random::<u16>() % WINDOW_JITTER)
     }
 
     fn build_tcp_packet(&self, flags: u8, payload: Option<&[u8]>) -> Bytes {
@@ -258,7 +255,8 @@ impl Socket {
     pub async fn recv(&self, buf: &mut [u8]) -> Option<usize> {
         match self.state {
             State::Established => {
-                self.incoming.recv_async().await.ok().and_then(|raw_buf| {
+                loop {
+                    let raw_buf = self.incoming.recv_async().await.ok()?;
                     let (_v4_packet, tcp_packet) = parse_ip_packet(&raw_buf).unwrap();
 
                     if (tcp_packet.get_flags() & tcp::TcpFlags::RST) != 0 {
@@ -273,6 +271,11 @@ impl Socket {
 
                     let payload = tcp_packet.payload();
 
+                    // Skip ACK-only packets (no payload) — update ack state but don't deliver to app
+                    if payload.is_empty() {
+                        continue;
+                    }
+
                     let new_ack = tcp_packet.get_sequence().wrapping_add(payload.len() as u32);
                     let last_ask = self.last_ack.load(Ordering::Relaxed);
                     self.ack.store(new_ack, Ordering::Relaxed);
@@ -281,16 +284,15 @@ impl Socket {
                     let send_ack = new_ack != last_ask;
 
                     if send_ack {
-                        let buf = self.build_tcp_packet(tcp::TcpFlags::ACK, None);
-                        if let Err(e) = self.tun.try_send(&buf) {
+                        let ack_buf = self.build_tcp_packet(tcp::TcpFlags::ACK, None);
+                        if let Err(e) = self.tun.try_send(&ack_buf) {
                             info!("Connection {} unable to send standalone ACK: {}", self, e)
                         }
                     }
 
                     buf[..payload.len()].copy_from_slice(payload);
-
-                    Some(payload.len())
-                })
+                    return Some(payload.len());
+                }
             }
             _ => unreachable!(),
         }
@@ -799,9 +801,8 @@ mod tests {
 
     #[test]
     fn test_window_varies_with_jitter() {
-        let base = 400u16;
         let windows: Vec<u16> = (0..20)
-            .map(|_| base.wrapping_add(rand::random::<u16>() % 32))
+            .map(|_| WINDOW_BASE + (rand::random::<u16>() % WINDOW_JITTER))
             .collect();
         let unique: std::collections::HashSet<u16> = windows.into_iter().collect();
         assert!(unique.len() > 1, "window values should vary with jitter");
@@ -809,11 +810,10 @@ mod tests {
 
     #[test]
     fn test_window_jitter_bounded() {
-        let base = 350u16;
         for _ in 0..100 {
-            let window = base.wrapping_add(rand::random::<u16>() % 32);
-            assert!(window >= base, "window {} should be >= base {}", window, base);
-            assert!(window < base + 32, "window {} should be < base + 32 = {}", window, base + 32);
+            let window = WINDOW_BASE + (rand::random::<u16>() % WINDOW_JITTER);
+            assert!(window >= WINDOW_BASE, "window {} should be >= WINDOW_BASE {}", window, WINDOW_BASE);
+            assert!(window < WINDOW_BASE + WINDOW_JITTER, "window {} should be < WINDOW_BASE+JITTER {}", window, WINDOW_BASE + WINDOW_JITTER);
         }
     }
 
