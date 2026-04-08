@@ -4,8 +4,22 @@ use pnet::packet::{MutablePacket, Packet};
 use pnet::packet::{ip, ipv4, ipv6, tcp};
 use std::convert::TryInto;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::{OnceLock, atomic::{AtomicU16, Ordering}};
+
+/// Global IP ID counter, initialized to a random value on first use.
+/// Matches udp2raw behavior: single global counter, random seed, monotonically
+/// incrementing per packet (network.cpp:36, 374, 1184).
+static IP_ID_COUNTER: OnceLock<AtomicU16> = OnceLock::new();
+
+fn next_ip_id() -> u16 {
+    IP_ID_COUNTER
+        .get_or_init(|| AtomicU16::new(rand::random::<u16>()))
+        .fetch_add(1, Ordering::Relaxed)
+}
 
 const IPV4_HEADER_LEN: usize = 20;
+/// Window scale shift count matching udp2raw (network.cpp wscale=5).
+pub const WSCALE: u8 = 5;
 const IPV6_HEADER_LEN: usize = 40;
 const TCP_HEADER_LEN: usize = 20;
 pub const MAX_PACKET_LEN: usize = 1500;
@@ -77,6 +91,7 @@ pub fn build_tcp_packet(
             v4.set_destination(*remote.ip());
             v4.set_total_length(total_len.try_into().unwrap());
             v4.set_flags(ipv4::Ipv4Flags::DontFragment);
+            v4.set_identification(next_ip_id());
             let mut cksm = Checksum::new();
             cksm.add_bytes(v4.packet());
             v4.set_checksum(u16::from_be_bytes(cksm.checksum()));
@@ -125,7 +140,7 @@ pub fn build_tcp_packet(
         opts[16] = 1;
         opts[17] = 3;
         opts[18] = 3;
-        opts[19] = 5;
+        opts[19] = WSCALE;
     } else {
         // Non-SYN packets: NOP + NOP + Timestamps (12 bytes, doff=8)
         let pkt = tcp.packet_mut();

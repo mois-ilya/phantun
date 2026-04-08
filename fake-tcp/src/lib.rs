@@ -56,7 +56,7 @@ use std::sync::{
     atomic::{AtomicU16, AtomicU32, Ordering},
     Arc, RwLock,
 };
-use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -70,7 +70,6 @@ const MPMC_BUFFER_LEN: usize = 512;
 const MPSC_BUFFER_LEN: usize = 128;
 
 /// udp2raw fingerprint constants
-const WSCALE: u8 = 5;
 const WINDOW_BASE: u16 = 40960;
 const WINDOW_JITTER: u16 = 512;
 
@@ -123,10 +122,6 @@ pub struct Socket {
     ack: AtomicU32,
     last_ack: AtomicU32,
     state: State,
-    /// Epoch for computing ts_val
-    ts_epoch: Instant,
-    /// Random offset added to ts_val to avoid leaking uptime
-    ts_offset: u32,
     /// Last received peer tsval, echoed back as ts_ecr
     ts_ecr: AtomicU32,
     /// Last window value we sent, reused for duplicate ACKs
@@ -164,8 +159,6 @@ impl Socket {
                 ack: AtomicU32::new(ack.unwrap_or(0)),
                 last_ack: AtomicU32::new(ack.unwrap_or(0)),
                 state,
-                ts_epoch: Instant::now(),
-                ts_offset: rand::random::<u32>(),
                 ts_ecr: AtomicU32::new(0),
                 last_window_sent: AtomicU16::new(0),
             },
@@ -181,9 +174,13 @@ impl Socket {
         Arc::as_ptr(&self.tun) as usize
     }
 
-    /// Compute the current ts_val from elapsed time + random offset
+    /// Compute the current ts_val as Unix epoch milliseconds (u32).
+    /// Matches udp2raw: get_current_time() returns epoch ms, cast to u32 (network.cpp:1665).
     fn current_ts_val(&self) -> u32 {
-        (self.ts_epoch.elapsed().as_millis() as u32).wrapping_add(self.ts_offset)
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u32
     }
 
     /// Compute the current advertised window value.
@@ -839,7 +836,7 @@ mod tests {
 
     #[test]
     fn test_wscale_is_5() {
-        assert_eq!(WSCALE, 5, "udp2raw uses wscale=5");
+        assert_eq!(packet::WSCALE, 5, "udp2raw uses wscale=5");
     }
 
     // --- WINDOW_BASE constant check ---

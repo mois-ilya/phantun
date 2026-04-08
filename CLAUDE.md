@@ -70,5 +70,5 @@ git config core.hooksPath .githooks
 - Binaries require `CAP_NET_ADMIN` or root for TUN device creation
 - Cross-compilation uses `cross` tool; MIPS targets require nightly toolchain
 - Integration test helpers live in `fake-tcp/src/testing.rs` (not `tests/common/mod.rs`, which is a thin re-export)
-- `cargo test --workspace` does not compile on macOS (tokio-tun is Linux-only); use `scripts/run-tests.sh`
+- **macOS**: `cargo build/test/clippy` all fail locally — `tokio-tun` is Linux-only. Always use `./scripts/run-tests.sh` (Docker) to build and verify changes.
 - Integration tests and throughput benchmarks require Linux (`--privileged` Docker for network namespaces + iptables)
