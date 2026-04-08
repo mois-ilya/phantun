@@ -3,6 +3,7 @@ use fake_tcp::packet::MAX_PACKET_LEN;
 use fake_tcp::Stack;
 use log::{debug, error, info};
 use phantun::utils::{assign_ipv6_address, new_udp_reuseport};
+use phantun::xor;
 use std::fs;
 use std::io;
 use std::net::Ipv4Addr;
@@ -14,6 +15,20 @@ use tokio_tun::TunBuilder;
 use tokio_util::sync::CancellationToken;
 
 use phantun::UDP_TTL;
+
+fn encode_payload(key: &Option<Vec<u8>>, payload: &[u8]) -> Vec<u8> {
+    match key {
+        Some(k) => xor::encode(k, payload),
+        None => payload.to_vec(),
+    }
+}
+
+fn decode_payload(key: &Option<Vec<u8>>, data: &[u8]) -> Option<Vec<u8>> {
+    match key {
+        Some(k) => xor::decode(k, data),
+        None => Some(data.to_vec()),
+    }
+}
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -101,6 +116,13 @@ async fn main() -> io::Result<()> {
                       Note: ensure this file's size does not exceed the MTU of the outgoing interface. \
                       The content is always sent out in a single packet and will not be further segmented")
         )
+        .arg(
+            Arg::new("key")
+                .long("key")
+                .required(false)
+                .value_name("KEY")
+                .help("XOR obfuscation key (must match client). If omitted, payload is sent as-is.")
+        )
         .get_matches();
 
     let local_port: u16 = matches
@@ -146,6 +168,10 @@ async fn main() -> io::Result<()> {
         .get_one::<String>("handshake_packet")
         .map(fs::read)
         .transpose()?;
+
+    let key: Arc<Option<Vec<u8>>> = Arc::new(
+        matches.get_one::<String>("key").map(|k| k.as_bytes().to_vec())
+    );
 
     let num_cpus = num_cpus::get();
     info!("{} cores available", num_cpus);
@@ -202,6 +228,7 @@ async fn main() -> io::Result<()> {
                 let quit = quit.clone();
                 let packet_received = packet_received.clone();
                 let udp_sock = new_udp_reuseport(local_addr);
+                let key = key.clone();
 
                 tokio::spawn(async move {
                     udp_sock.connect(remote_addr).await.unwrap();
@@ -209,7 +236,8 @@ async fn main() -> io::Result<()> {
                     loop {
                         tokio::select! {
                             Ok(size) = udp_sock.recv(&mut buf_udp) => {
-                                if sock.send(&buf_udp[..size]).await.is_none() {
+                                let payload = encode_payload(&key, &buf_udp[..size]);
+                                if sock.send(&payload).await.is_none() {
                                     quit.cancel();
                                     return;
                                 }
@@ -219,12 +247,15 @@ async fn main() -> io::Result<()> {
                             res = sock.recv(&mut buf_tcp) => {
                                 match res {
                                     Some(size) => {
-                                        if size > 0
-                                            && let Err(e) = udp_sock.send(&buf_tcp[..size]).await {
+                                        if size > 0 {
+                                            if let Some(decoded) = decode_payload(&key, &buf_tcp[..size]) {
+                                            if let Err(e) = udp_sock.send(&decoded).await {
                                                 error!("Unable to send UDP packet to {}: {}, closing connection", e, remote_addr);
                                                 quit.cancel();
                                                 return;
                                             }
+                                            }
+                                        }
                                     },
                                     None => {
                                         quit.cancel();

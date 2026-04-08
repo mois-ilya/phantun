@@ -3,6 +3,7 @@ use fake_tcp::packet::MAX_PACKET_LEN;
 use fake_tcp::{Socket, Stack};
 use log::{debug, error, info};
 use phantun::utils::{assign_ipv6_address, new_udp_reuseport, udp_recv_pktinfo};
+use phantun::xor;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -14,6 +15,20 @@ use tokio_tun::TunBuilder;
 use tokio_util::sync::CancellationToken;
 
 use phantun::UDP_TTL;
+
+fn encode_payload(key: &Option<Vec<u8>>, payload: &[u8]) -> Vec<u8> {
+    match key {
+        Some(k) => xor::encode(k, payload),
+        None => payload.to_vec(),
+    }
+}
+
+fn decode_payload(key: &Option<Vec<u8>>, data: &[u8]) -> Vec<u8> {
+    match key {
+        Some(k) => xor::decode(k, data).unwrap_or_default(),
+        None => data.to_vec(),
+    }
+}
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -101,6 +116,13 @@ async fn main() -> io::Result<()> {
                       Note: ensure this file's size does not exceed the MTU of the outgoing interface. \
                       The content is always sent out in a single packet and will not be further segmented")
         )
+        .arg(
+            Arg::new("key")
+                .long("key")
+                .required(false)
+                .value_name("KEY")
+                .help("XOR obfuscation key (must match server). If omitted, payload is sent as-is.")
+        )
         .get_matches();
 
     let local_addr: SocketAddr = matches
@@ -148,6 +170,10 @@ async fn main() -> io::Result<()> {
         .map(fs::read)
         .transpose()?;
 
+    let key: Arc<Option<Vec<u8>>> = Arc::new(
+        matches.get_one::<String>("key").map(|k| k.as_bytes().to_vec())
+    );
+
     let num_cpus = num_cpus::get();
     info!("{} cores available", num_cpus);
 
@@ -181,7 +207,8 @@ async fn main() -> io::Result<()> {
             // 2. It is some extra packets not filtered by more specific
             //    connected UDP socket yet
             if let Some(sock) = connections.read().await.get(&udp_remote_addr) {
-                sock.send(&buf_r[..size]).await;
+                let payload = encode_payload(&key, &buf_r[..size]);
+                sock.send(&payload).await;
                 continue;
             }
 
@@ -203,7 +230,8 @@ async fn main() -> io::Result<()> {
             }
 
             // send first packet
-            if sock.send(&buf_r[..size]).await.is_none() {
+            let first_payload = encode_payload(&key, &buf_r[..size]);
+            if sock.send(&first_payload).await.is_none() {
                 continue;
             }
 
@@ -225,6 +253,7 @@ async fn main() -> io::Result<()> {
                 let quit = quit.clone();
                 let packet_received = packet_received.clone();
 
+                let key = key.clone();
                 tokio::spawn(async move {
                     let mut buf_udp = [0u8; MAX_PACKET_LEN];
                     let mut buf_tcp = [0u8; MAX_PACKET_LEN];
@@ -260,7 +289,8 @@ async fn main() -> io::Result<()> {
                     loop {
                         tokio::select! {
                             Ok(size) = udp_sock.recv(&mut buf_udp) => {
-                                if sock.send(&buf_udp[..size]).await.is_none() {
+                                let payload = encode_payload(&key, &buf_udp[..size]);
+                                if sock.send(&payload).await.is_none() {
                                     debug!("removed fake TCP socket from connections table");
                                     quit.cancel();
                                     return;
@@ -271,12 +301,14 @@ async fn main() -> io::Result<()> {
                             res = sock.recv(&mut buf_tcp) => {
                                 match res {
                                     Some(size) => {
-                                        if size > 0
-                                            && let Err(e) = udp_sock.send(&buf_tcp[..size]).await {
+                                        if size > 0 {
+                                            let decoded = decode_payload(&key, &buf_tcp[..size]);
+                                            if let Err(e) = udp_sock.send(&decoded).await {
                                                 error!("Unable to send UDP packet to {}: {}, closing connection", e, remote_addr);
                                                 quit.cancel();
                                                 return;
                                             }
+                                        }
                                     },
                                     None => {
                                         debug!("removed fake TCP socket from connections table");
