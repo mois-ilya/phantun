@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fake_tcp::testing::{setup_test_env_with_config, TestEnv};
-use fake_tcp::{Socket, StealthLevel};
+use fake_tcp::Socket;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,20 +10,11 @@ use tokio::time::timeout;
 
 const SERVER_PORT_BASE: u16 = 15000;
 const TOTAL_BYTES: usize = 10_485_760; // 10 MB
-// MSS for stealth Basic+ (accounts for 12 bytes of TCP timestamp options).
-// Stealth Off has MSS 1460 but using 1448 universally keeps all packets
-// within the 1500-byte TUN MTU regardless of stealth level.
+// MSS accounting for 12 bytes of TCP timestamp options.
 const CHUNK_SIZE: usize = 1448;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const MAX_SETUP_RETRIES: usize = 10;
-
-const STEALTH_LEVELS: &[(StealthLevel, &str)] = &[
-    (StealthLevel::Off, "stealth_off"),
-    (StealthLevel::Basic, "stealth_basic"),
-    (StealthLevel::Standard, "stealth_standard"),
-    (StealthLevel::Full, "stealth_full"),
-];
 
 /// Establish N connections sequentially (connect/accept are &mut self).
 async fn establish_connections(
@@ -52,11 +43,10 @@ async fn establish_connections(
     pairs
 }
 
-/// Spawn persistent drain tasks that continuously consume ACK packets from
+/// Spawn persistent drain tasks that continuously consume packets from
 /// client sockets' incoming channels. This prevents the bounded channel
 /// (capacity 512) from filling up and blocking the Stack reader task between
-/// criterion iterations. At stealth Full, draining also advances
-/// `last_acked_seq`, preventing the send-window constraint from stalling.
+/// criterion iterations.
 ///
 /// Returns join handles that run until the client sockets are dropped.
 fn spawn_drain_tasks(
@@ -77,14 +67,6 @@ fn spawn_drain_tasks(
 }
 
 /// Send `total_bytes` from client to server using concurrent send+recv.
-///
-/// Client ACK draining is handled externally by persistent drain tasks
-/// (see `spawn_drain_tasks`), so this function only does the data transfer.
-///
-/// Uses `tokio::spawn` for true concurrency between sender and receiver,
-/// avoiding starvation that can occur with `tokio::join!` on a single task.
-///
-/// Panics if the transfer does not complete within `TRANSFER_TIMEOUT`.
 async fn send_recv_loop(client: Arc<Socket>, server: Arc<Socket>, total_bytes: usize) {
     const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -123,9 +105,6 @@ async fn send_recv_loop(client: Arc<Socket>, server: Arc<Socket>, total_bytes: u
 }
 
 fn bench_throughput(c: &mut Criterion) {
-    // Worker threads: single-core uses 2 threads (one for Stack reader, one for
-    // data transfer) to avoid starvation; multi-core uses the requested count.
-    // TUN queues match the logical core count for scaling measurement.
     let core_counts: &[(usize, usize, &str)] = &[(2, 1, "1core"), (4, 4, "4core")];
 
     for &(worker_threads, tun_queues, core_label) in core_counts {
@@ -139,90 +118,78 @@ fn bench_throughput(c: &mut Criterion) {
         group.measurement_time(Duration::from_secs(60));
         group.sample_size(10);
 
-        for &(stealth, stealth_label) in STEALTH_LEVELS {
-            // Use 4x connections for multi-core to exercise all TUN queues.
-            // With random queue assignment (Stack::connect uses choose(&mut rng)),
-            // verify that all queues are covered and retry setup if not.
-            let num_connections = if tun_queues > 1 { tun_queues * 4 } else { 1 };
-            let bytes_per_connection = TOTAL_BYTES / num_connections;
+        let num_connections = if tun_queues > 1 { tun_queues * 4 } else { 1 };
+        let bytes_per_connection = TOTAL_BYTES / num_connections;
 
-            // Setup outside b.iter(): expensive env creation + handshakes.
-            // For multi-core, verify all TUN queues are used; retry if not.
-            let (mut env, pairs) = rt.block_on(async {
-                for attempt in 0..MAX_SETUP_RETRIES {
-                    let mut env = setup_test_env_with_config(stealth, tun_queues).await;
-                    let pairs = establish_connections(
-                        &mut env,
-                        num_connections,
-                        SERVER_PORT_BASE,
-                    )
-                    .await;
+        let (mut env, pairs) = rt.block_on(async {
+            for attempt in 0..MAX_SETUP_RETRIES {
+                let mut env = setup_test_env_with_config(tun_queues).await;
+                let pairs = establish_connections(
+                    &mut env,
+                    num_connections,
+                    SERVER_PORT_BASE,
+                )
+                .await;
 
-                    if tun_queues <= 1 {
-                        return (env, pairs);
-                    }
-
-                    // Verify all TUN queues are covered by both client and server connections.
-                    let client_queues: HashSet<usize> =
-                        pairs.iter().map(|(c, _)| c.tun_queue_id()).collect();
-                    let server_queues: HashSet<usize> =
-                        pairs.iter().map(|(_, s)| s.tun_queue_id()).collect();
-                    if client_queues.len() >= tun_queues && server_queues.len() >= tun_queues {
-                        return (env, pairs);
-                    }
-
-                    eprintln!(
-                        "Queue coverage client={}/{} server={}/{} on attempt {}, retrying setup...",
-                        client_queues.len(),
-                        tun_queues,
-                        server_queues.len(),
-                        tun_queues,
-                        attempt + 1,
-                    );
-                    drop(pairs);
-                    env.shutdown().await;
+                if tun_queues <= 1 {
+                    return (env, pairs);
                 }
-                panic!(
-                    "Failed to achieve full TUN queue coverage after {} attempts",
-                    MAX_SETUP_RETRIES,
+
+                let client_queues: HashSet<usize> =
+                    pairs.iter().map(|(c, _)| c.tun_queue_id()).collect();
+                let server_queues: HashSet<usize> =
+                    pairs.iter().map(|(_, s)| s.tun_queue_id()).collect();
+                if client_queues.len() >= tun_queues && server_queues.len() >= tun_queues {
+                    return (env, pairs);
+                }
+
+                eprintln!(
+                    "Queue coverage client={}/{} server={}/{} on attempt {}, retrying setup...",
+                    client_queues.len(),
+                    tun_queues,
+                    server_queues.len(),
+                    tun_queues,
+                    attempt + 1,
                 );
-            });
-
-            // Spawn persistent drain tasks that live across all criterion
-            // iterations. They continuously consume ACK packets from client
-            // sockets so the Stack reader never blocks on a full channel.
-            let drain_handles = spawn_drain_tasks(&rt, &pairs);
-
-            group.bench_with_input(
-                BenchmarkId::from_parameter(stealth_label),
-                &stealth_label,
-                |b, _| {
-                    b.iter(|| {
-                        rt.block_on(async {
-                            let mut set = tokio::task::JoinSet::new();
-                            for (client, server) in &pairs {
-                                let client = Arc::clone(client);
-                                let server = Arc::clone(server);
-                                let bytes = bytes_per_connection;
-                                set.spawn(async move {
-                                    send_recv_loop(client, server, bytes).await;
-                                });
-                            }
-                            while let Some(result) = set.join_next().await {
-                                result.expect("send_recv task panicked");
-                            }
-                        });
-                    });
-                },
-            );
-
-            // Drop socket pairs first so drain tasks see channel close and exit
-            drop(pairs);
-            for handle in drain_handles {
-                rt.block_on(handle).ok();
+                drop(pairs);
+                env.shutdown().await;
             }
-            rt.block_on(env.shutdown());
+            panic!(
+                "Failed to achieve full TUN queue coverage after {} attempts",
+                MAX_SETUP_RETRIES,
+            );
+        });
+
+        let drain_handles = spawn_drain_tasks(&rt, &pairs);
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(core_label),
+            &core_label,
+            |b, _| {
+                b.iter(|| {
+                    rt.block_on(async {
+                        let mut set = tokio::task::JoinSet::new();
+                        for (client, server) in &pairs {
+                            let client = Arc::clone(client);
+                            let server = Arc::clone(server);
+                            let bytes = bytes_per_connection;
+                            set.spawn(async move {
+                                send_recv_loop(client, server, bytes).await;
+                            });
+                        }
+                        while let Some(result) = set.join_next().await {
+                            result.expect("send_recv task panicked");
+                        }
+                    });
+                });
+            },
+        );
+
+        drop(pairs);
+        for handle in drain_handles {
+            rt.block_on(handle).ok();
         }
+        rt.block_on(env.shutdown());
 
         group.finish();
     }

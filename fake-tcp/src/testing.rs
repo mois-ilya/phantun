@@ -2,7 +2,7 @@
 // Feature-gated behind `integration-tests` — this module is only compiled when
 // the feature is enabled.
 
-use crate::{Socket, Stack, StealthLevel};
+use crate::{Socket, Stack};
 use std::net::Ipv4Addr;
 use std::process::Command;
 use std::sync::Arc;
@@ -165,12 +165,11 @@ impl Drop for TestEnv {
 /// Set up two isolated namespaces with a veth cross-link and TUN devices,
 /// then return a `TestEnv` with ready-to-use `Stack` objects.
 ///
-/// - `stealth`: stealth level for both client and server stacks
 /// - `tun_queues`: number of TUN queues for client and server TUNs
 ///   (raw_client_tun always uses 1 queue)
 ///
 /// Must be called from within a tokio runtime context.
-pub async fn setup_test_env_with_config(stealth: StealthLevel, tun_queues: usize) -> TestEnv {
+pub async fn setup_test_env_with_config(tun_queues: usize) -> TestEnv {
     let sfx = unique_suffix();
 
     // Interface/namespace names (<=15 chars to respect IFNAMSIZ).
@@ -290,8 +289,8 @@ pub async fn setup_test_env_with_config(stealth: StealthLevel, tun_queues: usize
     );
 
     // ── 7. Build Stack objects ───────────────────────────────────────────────
-    let client_stack = Stack::new(client_tuns, tun_c_dest, None, stealth);
-    let server_stack = Stack::new(server_tuns, tun_s_addr, None, stealth);
+    let client_stack = Stack::new(client_tuns, tun_c_dest, None);
+    let server_stack = Stack::new(server_tuns, tun_s_addr, None);
     let raw_client_tun = raw_tuns.into_iter().next().unwrap();
 
     TestEnv {
@@ -303,9 +302,9 @@ pub async fn setup_test_env_with_config(stealth: StealthLevel, tun_queues: usize
     }
 }
 
-/// Convenience wrapper: set up test env with default config (StealthLevel::Off, 1 TUN queue).
+/// Convenience wrapper: set up test env with default config (1 TUN queue).
 pub async fn setup_test_env() -> TestEnv {
-    setup_test_env_with_config(StealthLevel::Off, 1).await
+    setup_test_env_with_config(1).await
 }
 
 // ── bulk transfer helper ────────────────────────────────────────────────────
@@ -316,8 +315,7 @@ pub async fn setup_test_env() -> TestEnv {
 /// must complete within `transfer_timeout` or the function panics.
 ///
 /// This is the canonical send/recv loop shared by integration tests and benchmarks.
-/// Client ACK draining (needed for stealth Full) must be handled externally by
-/// the caller if required.
+/// Client ACK draining must be handled externally by the caller if required.
 pub async fn send_recv_loop(
     client: Arc<Socket>,
     server: Arc<Socket>,

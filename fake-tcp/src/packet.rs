@@ -5,8 +5,6 @@ use pnet::packet::{ip, ipv4, ipv6, tcp};
 use std::convert::TryInto;
 use std::net::{IpAddr, SocketAddr};
 
-use crate::StealthLevel;
-
 const IPV4_HEADER_LEN: usize = 20;
 const IPV6_HEADER_LEN: usize = 40;
 const TCP_HEADER_LEN: usize = 20;
@@ -33,6 +31,10 @@ impl IPPacket<'_> {
     }
 }
 
+/// Build a TCP/IP packet with the udp2raw fingerprint hardcoded:
+/// - SYN options: MSS(1460) + SACK_PERM + Timestamps + NOP + WScale(5) = 20 bytes
+/// - Non-SYN options: NOP + NOP + Timestamps = 12 bytes
+/// - DF flag always set, TTL=64
 #[allow(clippy::too_many_arguments)]
 pub fn build_tcp_packet(
     local_addr: SocketAddr,
@@ -41,7 +43,6 @@ pub fn build_tcp_packet(
     ack: u32,
     flags: u8,
     payload: Option<&[u8]>,
-    stealth: StealthLevel,
     ts_val: u32,
     ts_ecr: u32,
     window: u16,
@@ -52,15 +53,9 @@ pub fn build_tcp_packet(
     };
     let is_syn = (flags & tcp::TcpFlags::SYN) != 0;
     let tcp_options_len = if is_syn {
-        if stealth >= StealthLevel::Basic {
-            20 // MSS(4) + SACK_PERM(2)+TS_hdr(2) + TS_val(4) + TS_ecr(4) + NOP(1)+wscale(3)
-        } else {
-            4 // NOP(1) + wscale(3)
-        }
-    } else if stealth >= StealthLevel::Basic {
-        12 // NOP(1) + NOP(1) + TS(10)
+        20 // MSS(4) + SACK_PERM(2)+TS_hdr(2) + TS_val(4) + TS_ecr(4) + NOP(1)+wscale(3)
     } else {
-        0
+        12 // NOP(1) + NOP(1) + TS(10)
     };
     let tcp_header_len = TCP_HEADER_LEN + tcp_options_len;
     let tcp_total_len = tcp_header_len + payload.map_or(0, |payload| payload.len());
@@ -106,36 +101,32 @@ pub fn build_tcp_packet(
     tcp.set_acknowledgement(ack);
     tcp.set_flags(flags);
     tcp.set_data_offset((tcp_header_len / 4) as u8);
+
     if is_syn {
-        if stealth >= StealthLevel::Basic {
-            // Linux 5.x SYN fingerprint (compact layout from tcp_options_write):
-            // MSS(4) + SACK_PERM(2)+TS_hdr(2) + TS_val(4) + TS_ecr(4) + NOP+WS(4) = 20 bytes
-            // The kernel packs SACK_PERM as padding before the Timestamps option.
-            let pkt = tcp.packet_mut();
-            let opts = &mut pkt[TCP_HEADER_LEN..tcp_header_len];
-            // MSS: kind=2, len=4, value=1460 (0x05B4)
-            opts[0] = 2;
-            opts[1] = 4;
-            opts[2] = 0x05;
-            opts[3] = 0xB4;
-            // SACK permitted (kind=4, len=2) + Timestamps header (kind=8, len=10)
-            opts[4] = 4;
-            opts[5] = 2;
-            opts[6] = 8;
-            opts[7] = 10;
-            // Timestamps: tsval, tsecr
-            opts[8..12].copy_from_slice(&ts_val.to_be_bytes());
-            opts[12..16].copy_from_slice(&ts_ecr.to_be_bytes());
-            // NOP + Window scale: kind=3, len=3, shift=7
-            opts[16] = 1;
-            opts[17] = 3;
-            opts[18] = 3;
-            opts[19] = 7;
-        } else {
-            let wscale = tcp::TcpOption::wscale(14);
-            tcp.set_options(&[tcp::TcpOption::nop(), wscale]);
-        }
-    } else if stealth >= StealthLevel::Basic {
+        // Linux 5.x SYN fingerprint (compact layout from tcp_options_write):
+        // MSS(4) + SACK_PERM(2)+TS_hdr(2) + TS_val(4) + TS_ecr(4) + NOP+WS(4) = 20 bytes
+        // The kernel packs SACK_PERM as padding before the Timestamps option.
+        let pkt = tcp.packet_mut();
+        let opts = &mut pkt[TCP_HEADER_LEN..tcp_header_len];
+        // MSS: kind=2, len=4, value=1460 (0x05B4)
+        opts[0] = 2;
+        opts[1] = 4;
+        opts[2] = 0x05;
+        opts[3] = 0xB4;
+        // SACK permitted (kind=4, len=2) + Timestamps header (kind=8, len=10)
+        opts[4] = 4;
+        opts[5] = 2;
+        opts[6] = 8;
+        opts[7] = 10;
+        // Timestamps: tsval, tsecr
+        opts[8..12].copy_from_slice(&ts_val.to_be_bytes());
+        opts[12..16].copy_from_slice(&ts_ecr.to_be_bytes());
+        // NOP + Window scale: kind=3, len=3, shift=5
+        opts[16] = 1;
+        opts[17] = 3;
+        opts[18] = 3;
+        opts[19] = 5;
+    } else {
         // Non-SYN packets: NOP + NOP + Timestamps (12 bytes, doff=8)
         let pkt = tcp.packet_mut();
         let opts = &mut pkt[TCP_HEADER_LEN..tcp_header_len];
@@ -243,20 +234,20 @@ mod tests {
     fn ipv4_syn_packet() -> Bytes {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Off, 0, 0, 0xFFFF)
+        build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, 0, 0, 0xFFFF)
     }
 
     fn ipv6_syn_packet() -> Bytes {
         let local: SocketAddr = "[fd00::1]:1234".parse().unwrap();
         let remote: SocketAddr = "[fd00::2]:5678".parse().unwrap();
-        build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Off, 0, 0, 0xFFFF)
+        build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, 0, 0, 0xFFFF)
     }
 
     #[test]
     fn test_ipv4_syn_total_length() {
         let pkt = ipv4_syn_packet();
-        // 20 (IPv4 header) + 24 (TCP header with options: 20 base + 4 options) = 44
-        assert_eq!(pkt.len(), 44);
+        // 20 (IPv4 header) + 40 (TCP: 20 base + 20 options) = 60
+        assert_eq!(pkt.len(), 60);
     }
 
     #[test]
@@ -267,7 +258,7 @@ mod tests {
         assert_eq!(v4.get_next_level_protocol(), ip::IpNextHeaderProtocols::Tcp);
         assert_eq!(v4.get_ttl(), 64);
         assert_eq!(v4.get_flags(), ipv4::Ipv4Flags::DontFragment);
-        assert_eq!(v4.get_total_length() as usize, 44);
+        assert_eq!(v4.get_total_length() as usize, 60);
     }
 
     #[test]
@@ -275,20 +266,31 @@ mod tests {
         let pkt = ipv4_syn_packet();
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::SYN);
-        assert_eq!(tcp_pkt.get_data_offset(), 6, "doff=6 means 24-byte TCP header");
+        assert_eq!(tcp_pkt.get_data_offset(), 10, "doff=10 means 40-byte TCP header");
         assert_eq!(tcp_pkt.get_window(), 0xFFFF);
     }
 
     #[test]
-    fn test_ipv4_syn_tcp_options_nop_wscale() {
+    fn test_ipv4_syn_tcp_options_layout() {
         let pkt = ipv4_syn_packet();
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
-        assert_eq!(opts.len(), 4, "SYN options: NOP(1) + wscale(3) = 4 bytes");
-        assert_eq!(opts[0], 1, "NOP kind=1");
-        assert_eq!(opts[1], 3, "wscale kind=3");
-        assert_eq!(opts[2], 3, "wscale length=3");
-        assert_eq!(opts[3], 14, "wscale shift=14");
+        assert_eq!(opts.len(), 20, "SYN options: MSS(4)+SACK(2)+TS_hdr(2)+TS(8)+NOP+WS(4) = 20 bytes");
+        // MSS
+        assert_eq!(opts[0], 2, "MSS kind");
+        assert_eq!(opts[1], 4, "MSS len");
+        assert_eq!(u16::from_be_bytes([opts[2], opts[3]]), 1460, "MSS value=1460");
+        // SACK_PERM
+        assert_eq!(opts[4], 4, "SACK_PERM kind");
+        assert_eq!(opts[5], 2, "SACK_PERM len");
+        // Timestamps header
+        assert_eq!(opts[6], 8, "TS kind");
+        assert_eq!(opts[7], 10, "TS len");
+        // NOP + wscale=5
+        assert_eq!(opts[16], 1, "NOP before wscale");
+        assert_eq!(opts[17], 3, "wscale kind");
+        assert_eq!(opts[18], 3, "wscale len");
+        assert_eq!(opts[19], 5, "wscale shift=5");
     }
 
     #[test]
@@ -297,7 +299,7 @@ mod tests {
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let seq = 0x12345678u32;
         let ack = 0x87654321u32;
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None, StealthLevel::Off, 0, 0, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None, 0, 0, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         assert_eq!(tcp_pkt.get_sequence(), seq);
         assert_eq!(tcp_pkt.get_acknowledgement(), ack);
@@ -307,7 +309,7 @@ mod tests {
     fn test_ipv4_syn_checksum_valid() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Off, 0, 0, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, 0, 0, 0xFFFF);
 
         // Verify IPv4 header checksum
         let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
@@ -337,8 +339,8 @@ mod tests {
     #[test]
     fn test_ipv6_syn_total_length() {
         let pkt = ipv6_syn_packet();
-        // 40 (IPv6 header) + 24 (TCP header with options) = 64
-        assert_eq!(pkt.len(), 64);
+        // 40 (IPv6 header) + 40 (TCP header with options) = 80
+        assert_eq!(pkt.len(), 80);
     }
 
     #[test]
@@ -348,7 +350,7 @@ mod tests {
         assert_eq!(v6.get_version(), 6);
         assert_eq!(v6.get_next_header(), ip::IpNextHeaderProtocols::Tcp);
         assert_eq!(v6.get_hop_limit(), 64);
-        assert_eq!(v6.get_payload_length() as usize, 24, "payload_length = TCP header with options");
+        assert_eq!(v6.get_payload_length() as usize, 40, "payload_length = TCP header with options");
     }
 
     #[test]
@@ -357,42 +359,39 @@ mod tests {
         let remote: SocketAddr = "[fd00::2]:9001".parse().unwrap();
         let seq = 0xABCDu32;
         let ack = 0x1234u32;
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None, StealthLevel::Off, 0, 0, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None, 0, 0, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[40..]).unwrap();
         assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::SYN);
-        assert_eq!(tcp_pkt.get_data_offset(), 6);
+        assert_eq!(tcp_pkt.get_data_offset(), 10);
         assert_eq!(tcp_pkt.get_window(), 0xFFFF);
         assert_eq!(tcp_pkt.get_sequence(), seq);
         assert_eq!(tcp_pkt.get_acknowledgement(), ack);
         let opts = tcp_pkt.get_options_raw();
-        assert_eq!(opts.len(), 4);
-        assert_eq!(opts[0], 1);  // NOP
-        assert_eq!(opts[1], 3);  // wscale kind
-        assert_eq!(opts[2], 3);  // wscale length
-        assert_eq!(opts[3], 14); // wscale shift
+        assert_eq!(opts.len(), 20);
+        assert_eq!(opts[0], 2);   // MSS kind
+        assert_eq!(u16::from_be_bytes([opts[2], opts[3]]), 1460);
+        assert_eq!(opts[19], 5);  // wscale shift=5
     }
-
-    // --- Task 3: data and control packets ---
 
     #[test]
     fn test_ipv4_ack_data_total_length() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let payload = b"hello world";
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off, 0, 0, 0xFFFF);
-        // 20 (IPv4) + 20 (TCP, no options) + 11 (payload) = 51
-        assert_eq!(pkt.len(), 20 + 20 + payload.len());
+        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload), 0, 0, 0xFFFF);
+        // 20 (IPv4) + 32 (TCP: 20 base + 12 timestamp options) + 11 (payload) = 63
+        assert_eq!(pkt.len(), 20 + 32 + payload.len());
     }
 
     #[test]
-    fn test_ipv4_ack_data_doff_no_options_window() {
+    fn test_ipv4_ack_data_doff_timestamps_window() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let payload = b"data";
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off, 0, 0, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload), 0, 0, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_data_offset(), 5, "doff=5 means 20-byte TCP header (no options)");
-        assert_eq!(tcp_pkt.get_options_raw().len(), 0, "no TCP options for data packets");
+        assert_eq!(tcp_pkt.get_data_offset(), 8, "doff=8 means 32-byte TCP header (with TS options)");
+        assert_eq!(tcp_pkt.get_options_raw().len(), 12, "NOP+NOP+TS = 12 bytes");
         assert_eq!(tcp_pkt.get_window(), 0xFFFF);
     }
 
@@ -401,20 +400,9 @@ mod tests {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let payload = b"test payload bytes";
-        let pkt = build_tcp_packet(local, remote, 42, 99, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off, 0, 0, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, 42, 99, tcp::TcpFlags::ACK, Some(payload), 0, 0, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         assert_eq!(tcp_pkt.payload(), payload);
-    }
-
-    #[test]
-    fn test_ipv4_ack_data_flags_ack_only() {
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let payload = b"data";
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off, 0, 0, 0xFFFF);
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::ACK, "only ACK flag set, no PSH");
-        assert_eq!(tcp_pkt.get_flags() & tcp::TcpFlags::PSH, 0, "PSH flag not set");
     }
 
     #[test]
@@ -430,12 +418,11 @@ mod tests {
             ack,
             tcp::TcpFlags::RST | tcp::TcpFlags::ACK,
             None,
-            StealthLevel::Off,
             0, 0,
             0xFFFF,
         );
-        // 20 (IPv4) + 20 (TCP) = 40, no payload
-        assert_eq!(pkt.len(), 40);
+        // 20 (IPv4) + 32 (TCP with TS options) = 52, no payload
+        assert_eq!(pkt.len(), 52);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::RST | tcp::TcpFlags::ACK);
         assert_eq!(tcp_pkt.payload().len(), 0);
@@ -454,32 +441,29 @@ mod tests {
             1,
             tcp::TcpFlags::SYN | tcp::TcpFlags::ACK,
             None,
-            StealthLevel::Off,
             0, 0,
             0xFFFF,
         );
-        // SYN|ACK: wscale is set because SYN flag is present → 44 bytes
-        assert_eq!(pkt.len(), 44);
+        // SYN|ACK: has SYN flag -> 20-byte options -> 60 bytes
+        assert_eq!(pkt.len(), 60);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::SYN | tcp::TcpFlags::ACK);
-        assert_eq!(tcp_pkt.get_data_offset(), 6);
+        assert_eq!(tcp_pkt.get_data_offset(), 10);
         let opts = tcp_pkt.get_options_raw();
-        assert_eq!(opts.len(), 4);
-        assert_eq!(opts[0], 1);  // NOP
-        assert_eq!(opts[1], 3);  // wscale kind
-        assert_eq!(opts[2], 3);  // wscale length
-        assert_eq!(opts[3], 14); // wscale shift=14
+        assert_eq!(opts.len(), 20);
+        assert_eq!(opts[0], 2);   // MSS
+        assert_eq!(opts[19], 5);  // wscale=5
     }
 
     #[test]
     fn test_ack_only_no_data_length() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, None, StealthLevel::Off, 0, 0, 0xFFFF);
-        // 20 (IPv4) + 20 (TCP, no options, no payload) = 40
-        assert_eq!(pkt.len(), 40);
+        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, None, 0, 0, 0xFFFF);
+        // 20 (IPv4) + 32 (TCP with TS options) = 52
+        assert_eq!(pkt.len(), 52);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_data_offset(), 5);
+        assert_eq!(tcp_pkt.get_data_offset(), 8);
         assert_eq!(tcp_pkt.payload().len(), 0);
     }
 
@@ -490,22 +474,20 @@ mod tests {
         let payload = b"ipv6 payload";
         let seq = 100u32;
         let ack = 200u32;
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off, 0, 0, 0xFFFF);
-        // 40 (IPv6) + 20 (TCP) + payload
-        assert_eq!(pkt.len(), 40 + 20 + payload.len());
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload), 0, 0, 0xFFFF);
+        // 40 (IPv6) + 32 (TCP with TS) + payload
+        assert_eq!(pkt.len(), 40 + 32 + payload.len());
         let v6 = ipv6::Ipv6Packet::new(&pkt).unwrap();
         assert_eq!(v6.get_version(), 6);
-        assert_eq!(v6.get_payload_length() as usize, 20 + payload.len());
+        assert_eq!(v6.get_payload_length() as usize, 32 + payload.len());
         let tcp_pkt = tcp::TcpPacket::new(&pkt[40..]).unwrap();
         assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::ACK);
-        assert_eq!(tcp_pkt.get_data_offset(), 5);
+        assert_eq!(tcp_pkt.get_data_offset(), 8);
         assert_eq!(tcp_pkt.get_window(), 0xFFFF);
         assert_eq!(tcp_pkt.get_sequence(), seq);
         assert_eq!(tcp_pkt.get_acknowledgement(), ack);
         assert_eq!(tcp_pkt.payload(), payload);
     }
-
-    // --- Task 4: parse_ip_packet() and round-trip ---
 
     #[test]
     fn test_roundtrip_ipv4_syn() {
@@ -513,20 +495,18 @@ mod tests {
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let seq = 0x12345678u32;
         let ack = 0u32;
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None, StealthLevel::Off, 0, 0, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None, 0, 0, 0xFFFF);
         let (ip_pkt, tcp_pkt) = parse_ip_packet(&pkt).unwrap();
         assert_eq!(ip_pkt.get_source(), IpAddr::V4("10.0.0.1".parse().unwrap()));
         assert_eq!(ip_pkt.get_destination(), IpAddr::V4("10.0.0.2".parse().unwrap()));
         assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::SYN);
         assert_eq!(tcp_pkt.get_sequence(), seq);
         assert_eq!(tcp_pkt.get_acknowledgement(), ack);
-        assert_eq!(tcp_pkt.get_data_offset(), 6);
+        assert_eq!(tcp_pkt.get_data_offset(), 10);
         assert_eq!(tcp_pkt.get_window(), 0xFFFF);
         let opts = tcp_pkt.get_options_raw();
-        assert_eq!(opts[0], 1);  // NOP
-        assert_eq!(opts[1], 3);  // wscale kind
-        assert_eq!(opts[2], 3);  // wscale length
-        assert_eq!(opts[3], 14); // wscale shift
+        assert_eq!(opts[0], 2);   // MSS
+        assert_eq!(opts[19], 5);  // wscale=5
     }
 
     #[test]
@@ -536,7 +516,7 @@ mod tests {
         let seq = 100u32;
         let ack = 200u32;
         let payload = b"roundtrip data";
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off, 0, 0, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload), 0, 0, 0xFFFF);
         let (ip_pkt, tcp_pkt) = parse_ip_packet(&pkt).unwrap();
         assert_eq!(ip_pkt.get_source(), IpAddr::V4("10.0.0.1".parse().unwrap()));
         assert_eq!(ip_pkt.get_destination(), IpAddr::V4("10.0.0.2".parse().unwrap()));
@@ -552,14 +532,14 @@ mod tests {
         let remote: SocketAddr = "[fd00::2]:9001".parse().unwrap();
         let seq = 0xABCDu32;
         let ack = 0u32;
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None, StealthLevel::Off, 0, 0, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::SYN, None, 0, 0, 0xFFFF);
         let (ip_pkt, tcp_pkt) = parse_ip_packet(&pkt).unwrap();
         assert_eq!(ip_pkt.get_source(), IpAddr::V6("fd00::1".parse().unwrap()));
         assert_eq!(ip_pkt.get_destination(), IpAddr::V6("fd00::2".parse().unwrap()));
         assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::SYN);
         assert_eq!(tcp_pkt.get_sequence(), seq);
         assert_eq!(tcp_pkt.get_acknowledgement(), ack);
-        assert_eq!(tcp_pkt.get_data_offset(), 6);
+        assert_eq!(tcp_pkt.get_data_offset(), 10);
         assert_eq!(tcp_pkt.get_window(), 0xFFFF);
     }
 
@@ -570,7 +550,7 @@ mod tests {
         let seq = 50u32;
         let ack = 60u32;
         let payload = b"ipv6 roundtrip";
-        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Off, 0, 0, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, seq, ack, tcp::TcpFlags::ACK, Some(payload), 0, 0, 0xFFFF);
         let (ip_pkt, tcp_pkt) = parse_ip_packet(&pkt).unwrap();
         assert_eq!(ip_pkt.get_source(), IpAddr::V6("fd00::1".parse().unwrap()));
         assert_eq!(ip_pkt.get_destination(), IpAddr::V6("fd00::2".parse().unwrap()));
@@ -617,209 +597,73 @@ mod tests {
         assert!(parse_ip_packet(&bytes).is_none());
     }
 
-    // --- Task 3 (stealth plan): Realistic SYN fingerprint tests ---
-
-    fn ipv4_stealth_syn_packet() -> Bytes {
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        build_tcp_packet(local, remote, 0x12345678, 0, tcp::TcpFlags::SYN, None, StealthLevel::Basic, 1000, 0, 0xFFFF)
-    }
-
     #[test]
-    fn test_stealth_syn_total_length_ipv4() {
-        let pkt = ipv4_stealth_syn_packet();
-        // 20 (IPv4) + 40 (TCP: 20 base + 20 options) = 60
-        assert_eq!(pkt.len(), 60);
-    }
-
-    #[test]
-    fn test_stealth_syn_doff_10() {
-        let pkt = ipv4_stealth_syn_packet();
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_data_offset(), 10, "doff=10 means 40-byte TCP header");
-    }
-
-    #[test]
-    fn test_stealth_syn_options_mss_1460() {
-        let pkt = ipv4_stealth_syn_packet();
+    fn test_syn_options_mss_1460() {
+        let pkt = ipv4_syn_packet();
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
         assert_eq!(opts.len(), 20);
-        // MSS: kind=2, len=4, value=1460 (0x05B4)
         assert_eq!(opts[0], 2, "MSS kind");
         assert_eq!(opts[1], 4, "MSS len");
         assert_eq!(u16::from_be_bytes([opts[2], opts[3]]), 1460, "MSS value");
     }
 
     #[test]
-    fn test_stealth_syn_options_sack_perm() {
-        let pkt = ipv4_stealth_syn_packet();
+    fn test_syn_options_sack_perm() {
+        let pkt = ipv4_syn_packet();
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
-        // SACK permitted (packed as TS padding): kind=4, len=2
         assert_eq!(opts[4], 4, "SACK_PERM kind");
         assert_eq!(opts[5], 2, "SACK_PERM len");
     }
 
     #[test]
-    fn test_stealth_syn_options_timestamps() {
-        let pkt = ipv4_stealth_syn_packet();
+    fn test_syn_options_timestamps() {
+        let pkt = ipv4_syn_packet();
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
-        // Timestamps: kind=8, len=10 (immediately after SACK_PERM)
         assert_eq!(opts[6], 8, "Timestamps kind");
         assert_eq!(opts[7], 10, "Timestamps len");
-        // tsecr should be 0 for SYN
         let ts_ecr = u32::from_be_bytes([opts[12], opts[13], opts[14], opts[15]]);
         assert_eq!(ts_ecr, 0, "ts_ecr=0 on initial SYN");
     }
 
     #[test]
-    fn test_stealth_syn_options_wscale_7() {
-        let pkt = ipv4_stealth_syn_packet();
+    fn test_syn_options_wscale_5() {
+        let pkt = ipv4_syn_packet();
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
-        // NOP + wscale: kind=3, len=3, shift=7
         assert_eq!(opts[16], 1, "NOP before wscale");
         assert_eq!(opts[17], 3, "wscale kind");
         assert_eq!(opts[18], 3, "wscale len");
-        assert_eq!(opts[19], 7, "wscale shift=7");
+        assert_eq!(opts[19], 5, "wscale shift=5");
     }
 
     #[test]
-    fn test_stealth_syn_options_full_linux_layout() {
-        // Verify the complete byte layout matches Linux 5.x tcp_options_write() SYN fingerprint
-        let pkt = ipv4_stealth_syn_packet();
+    fn test_syn_options_full_linux_layout() {
+        let pkt = ipv4_syn_packet();
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
         assert_eq!(opts.len(), 20);
-        // MSS(4) + SACK_PERM(2)+TS_hdr(2) + TS_val(4) + TS_ecr(4) + NOP+wscale(4) = 20
         let expected_prefix = [
             2, 4, 0x05, 0xB4, // MSS = 1460
-            4, 2,              // SACK permitted (packed as TS padding)
+            4, 2,              // SACK permitted
             8, 10,             // Timestamps kind + len
         ];
         assert_eq!(&opts[0..8], &expected_prefix);
         let expected_suffix = [
             1,          // NOP
-            3, 3, 7,    // wscale = 7
+            3, 3, 5,    // wscale = 5
         ];
         assert_eq!(&opts[16..20], &expected_suffix);
     }
 
     #[test]
-    fn test_stealth_syn_ack_has_same_options() {
-        // SYN+ACK with stealth should have the same Linux-like options
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let pkt = build_tcp_packet(
-            local, remote, 100, 1,
-            tcp::TcpFlags::SYN | tcp::TcpFlags::ACK, None,
-            StealthLevel::Basic,
-            1000, 500,
-            0xFFFF,
-        );
-        assert_eq!(pkt.len(), 60, "SYN+ACK stealth: 20 IPv4 + 40 TCP");
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_data_offset(), 10);
-        let opts = tcp_pkt.get_options_raw();
-        assert_eq!(opts.len(), 20);
-        // MSS
-        assert_eq!(opts[0], 2);
-        assert_eq!(u16::from_be_bytes([opts[2], opts[3]]), 1460);
-        // SACK_PERM (packed as TS padding)
-        assert_eq!(opts[4], 4);
-        // Timestamps
-        assert_eq!(opts[6], 8);
-        // NOP + wscale
-        assert_eq!(opts[17], 3);
-        assert_eq!(opts[19], 7);
-    }
-
-    #[test]
-    fn test_stealth_off_syn_still_old_format() {
-        // Stealth Off must produce the original format: NOP + wscale(14), doff=6
-        let pkt = ipv4_syn_packet(); // uses StealthLevel::Off
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_data_offset(), 6);
-        let opts = tcp_pkt.get_options_raw();
-        assert_eq!(opts.len(), 4);
-        assert_eq!(opts[0], 1);  // NOP
-        assert_eq!(opts[1], 3);  // wscale kind
-        assert_eq!(opts[3], 14); // wscale shift=14
-    }
-
-    #[test]
-    fn test_stealth_syn_ipv6_total_length() {
-        let local: SocketAddr = "[fd00::1]:1234".parse().unwrap();
-        let remote: SocketAddr = "[fd00::2]:5678".parse().unwrap();
-        let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Basic, 1000, 0, 0xFFFF);
-        // 40 (IPv6) + 40 (TCP: 20 base + 20 options) = 80
-        assert_eq!(pkt.len(), 80);
-        let v6 = ipv6::Ipv6Packet::new(&pkt).unwrap();
-        assert_eq!(v6.get_payload_length() as usize, 40);
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[40..]).unwrap();
-        assert_eq!(tcp_pkt.get_data_offset(), 10);
-    }
-
-    #[test]
-    fn test_stealth_syn_checksum_valid() {
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let pkt = build_tcp_packet(local, remote, 0x1234, 0, tcp::TcpFlags::SYN, None, StealthLevel::Basic, 1000, 0, 0xFFFF);
-
-        // Verify IPv4 header checksum
-        let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
-        let stored_ip_cksm = v4.get_checksum();
-        let mut ip_hdr = pkt[..20].to_vec();
-        ip_hdr[10] = 0;
-        ip_hdr[11] = 0;
-        let mut cksm = Checksum::new();
-        cksm.add_bytes(&ip_hdr);
-        assert_eq!(stored_ip_cksm, u16::from_be_bytes(cksm.checksum()));
-
-        // Verify TCP checksum
-        let tcp_len = pkt.len() - 20;
-        let mut tcp_bytes = pkt[20..].to_vec();
-        tcp_bytes[16] = 0;
-        tcp_bytes[17] = 0;
-        let ip::IpNextHeaderProtocol(proto) = ip::IpNextHeaderProtocols::Tcp;
-        let mut cksm = Checksum::new();
-        cksm.add_bytes(&[10, 0, 0, 1]);
-        cksm.add_bytes(&[10, 0, 0, 2]);
-        cksm.add_bytes(&[0, proto, (tcp_len >> 8) as u8, (tcp_len & 0xFF) as u8]);
-        cksm.add_bytes(&tcp_bytes);
-        assert_eq!(
-            tcp::TcpPacket::new(&pkt[20..]).unwrap().get_checksum(),
-            u16::from_be_bytes(cksm.checksum())
-        );
-    }
-
-    #[test]
-    fn test_stealth_standard_and_full_also_get_linux_syn() {
-        // Higher stealth levels should also produce Linux-like SYN
-        for stealth in [StealthLevel::Standard, StealthLevel::Full] {
-            let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-            let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-            let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, stealth, 1000, 0, 0xFFFF);
-            assert_eq!(pkt.len(), 60, "stealth {:?} SYN should be 60 bytes", stealth);
-            let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-            assert_eq!(tcp_pkt.get_data_offset(), 10);
-            let opts = tcp_pkt.get_options_raw();
-            assert_eq!(opts[0], 2); // MSS
-            assert_eq!(opts[19], 7); // wscale=7
-        }
-    }
-
-    // --- Task 4: Timestamps state tests ---
-
-    #[test]
-    fn test_stealth_data_packet_has_timestamps_doff8() {
-        // Non-SYN packets with stealth >= Basic should have NOP+NOP+TS options (12 bytes, doff=8)
+    fn test_data_packet_has_timestamps_doff8() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let payload = b"hello";
-        let pkt = build_tcp_packet(local, remote, 100, 200, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Basic, 5000, 3000, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, 100, 200, tcp::TcpFlags::ACK, Some(payload), 5000, 3000, 0xFFFF);
         // 20 (IPv4) + 32 (TCP: 20 base + 12 options) + 5 (payload) = 57
         assert_eq!(pkt.len(), 20 + 32 + payload.len());
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
@@ -827,16 +671,15 @@ mod tests {
     }
 
     #[test]
-    fn test_stealth_data_packet_timestamps_options_layout() {
+    fn test_data_packet_timestamps_options_layout() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let ts_val = 12345u32;
         let ts_ecr = 67890u32;
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"), StealthLevel::Basic, ts_val, ts_ecr, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"), ts_val, ts_ecr, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
         assert_eq!(opts.len(), 12);
-        // NOP + NOP + Timestamps(kind=8, len=10, tsval, tsecr)
         assert_eq!(opts[0], 1, "NOP");
         assert_eq!(opts[1], 1, "NOP");
         assert_eq!(opts[2], 8, "Timestamps kind");
@@ -848,15 +691,13 @@ mod tests {
     }
 
     #[test]
-    fn test_stealth_syn_has_tsval_filled_in() {
+    fn test_syn_has_tsval_filled_in() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let ts_val = 42000u32;
-        let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Basic, ts_val, 0, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, ts_val, 0, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
-        // SYN timestamps at opts[8..12] (tsval) and opts[12..16] (tsecr)
-        // (after MSS(4) + SACK_PERM(2)+TS_hdr(2))
         let parsed_tsval = u32::from_be_bytes([opts[8], opts[9], opts[10], opts[11]]);
         let parsed_tsecr = u32::from_be_bytes([opts[12], opts[13], opts[14], opts[15]]);
         assert_eq!(parsed_tsval, ts_val, "SYN tsval should be filled in");
@@ -864,13 +705,12 @@ mod tests {
     }
 
     #[test]
-    fn test_stealth_syn_ack_has_tsecr() {
-        // SYN+ACK should echo the peer's tsval
+    fn test_syn_ack_has_tsecr() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let ts_val = 50000u32;
-        let ts_ecr = 42000u32; // peer's tsval from SYN
-        let pkt = build_tcp_packet(local, remote, 0, 1, tcp::TcpFlags::SYN | tcp::TcpFlags::ACK, None, StealthLevel::Basic, ts_val, ts_ecr, 0xFFFF);
+        let ts_ecr = 42000u32;
+        let pkt = build_tcp_packet(local, remote, 0, 1, tcp::TcpFlags::SYN | tcp::TcpFlags::ACK, None, ts_val, ts_ecr, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let opts = tcp_pkt.get_options_raw();
         let parsed_tsval = u32::from_be_bytes([opts[8], opts[9], opts[10], opts[11]]);
@@ -880,39 +720,11 @@ mod tests {
     }
 
     #[test]
-    fn test_stealth_off_data_still_no_options() {
-        // Stealth Off data packets must still have no TCP options
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"), StealthLevel::Off, 0, 0, 0xFFFF);
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_data_offset(), 5, "stealth Off: doff=5, no options");
-        assert_eq!(tcp_pkt.get_options_raw().len(), 0);
-    }
-
-    #[test]
-    fn test_stealth_ack_only_has_timestamps() {
-        // ACK-only (no payload) with stealth should also have timestamps
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, None, StealthLevel::Basic, 1000, 500, 0xFFFF);
-        // 20 (IPv4) + 32 (TCP: 20 base + 12 options) = 52
-        assert_eq!(pkt.len(), 52);
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_data_offset(), 8);
-        let opts = tcp_pkt.get_options_raw();
-        assert_eq!(opts[0], 1); // NOP
-        assert_eq!(opts[1], 1); // NOP
-        assert_eq!(opts[2], 8); // TS kind
-    }
-
-    #[test]
-    fn test_stealth_data_packet_checksum_valid() {
-        // Verify TCP checksum is correct with timestamp options
+    fn test_data_checksum_valid() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let payload = b"checksum test";
-        let pkt = build_tcp_packet(local, remote, 100, 200, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Basic, 9999, 8888, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, 100, 200, tcp::TcpFlags::ACK, Some(payload), 9999, 8888, 0xFFFF);
         let tcp_len = pkt.len() - 20;
         let mut tcp_bytes = pkt[20..].to_vec();
         let stored_cksm = tcp::TcpPacket::new(&tcp_bytes).unwrap().get_checksum();
@@ -928,33 +740,35 @@ mod tests {
     }
 
     #[test]
-    fn test_stealth_ipv6_data_has_timestamps() {
-        let local: SocketAddr = "[fd00::1]:1234".parse().unwrap();
-        let remote: SocketAddr = "[fd00::2]:5678".parse().unwrap();
-        let payload = b"ipv6 ts";
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(payload), StealthLevel::Basic, 2000, 1000, 0xFFFF);
-        // 40 (IPv6) + 32 (TCP with TS) + payload
-        assert_eq!(pkt.len(), 40 + 32 + payload.len());
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[40..]).unwrap();
-        assert_eq!(tcp_pkt.get_data_offset(), 8);
-        let opts = tcp_pkt.get_options_raw();
-        assert_eq!(opts.len(), 12);
-        let parsed_tsval = u32::from_be_bytes([opts[4], opts[5], opts[6], opts[7]]);
-        assert_eq!(parsed_tsval, 2000);
+    fn test_psh_ack_flags_data_packet() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let payload = b"hello";
+        let pkt = build_tcp_packet(
+            local, remote, 1, 1,
+            tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
+            Some(payload), 1000, 500,
+            0xFFFF,
+        );
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(
+            tcp_pkt.get_flags(),
+            tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
+        );
+        assert_eq!(tcp_pkt.payload(), payload);
     }
 
     #[test]
-    fn test_timestamps_monotonically_increasing() {
-        // Two packets built with increasing ts_val should have increasing timestamps
+    fn test_window_value_passed_through() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let pkt1 = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"a"), StealthLevel::Basic, 1000, 0, 0xFFFF);
-        let pkt2 = build_tcp_packet(local, remote, 2, 1, tcp::TcpFlags::ACK, Some(b"b"), StealthLevel::Basic, 1050, 0, 0xFFFF);
-        let opts1 = tcp::TcpPacket::new(&pkt1[20..]).unwrap().get_options_raw().to_vec();
-        let opts2 = tcp::TcpPacket::new(&pkt2[20..]).unwrap().get_options_raw().to_vec();
-        let ts1 = u32::from_be_bytes([opts1[4], opts1[5], opts1[6], opts1[7]]);
-        let ts2 = u32::from_be_bytes([opts2[4], opts2[5], opts2[6], opts2[7]]);
-        assert!(ts2 > ts1, "timestamps should be monotonically increasing: {} > {}", ts2, ts1);
+        let window = 350u16;
+        let pkt = build_tcp_packet(
+            local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
+            1000, 500, window,
+        );
+        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
+        assert_eq!(tcp_pkt.get_window(), window);
     }
 
     // --- parse_tcp_timestamps tests ---
@@ -964,7 +778,7 @@ mod tests {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let ts_val = 55555u32;
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"x"), StealthLevel::Basic, ts_val, 0, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"x"), ts_val, 0, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let parsed = parse_tcp_timestamps(&tcp_pkt).map(|(tsval, _)| tsval);
         assert_eq!(parsed, Some(ts_val));
@@ -975,380 +789,19 @@ mod tests {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let ts_val = 77777u32;
-        let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Basic, ts_val, 0, 0xFFFF);
+        let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, ts_val, 0, 0xFFFF);
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let parsed = parse_tcp_timestamps(&tcp_pkt).map(|(tsval, _)| tsval);
         assert_eq!(parsed, Some(ts_val));
     }
 
     #[test]
-    fn test_parse_tcp_timestamp_stealth_off_returns_none() {
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        // Stealth Off data packet has no options
-        let pkt = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"x"), StealthLevel::Off, 0, 0, 0xFFFF);
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        let parsed = parse_tcp_timestamps(&tcp_pkt).map(|(tsval, _)| tsval);
-        assert_eq!(parsed, None);
-    }
-
-    // --- Task 5: PSH flag on data packets (Level 1) ---
-
-    #[test]
-    fn test_stealth_basic_data_psh_ack_flags() {
-        // With stealth >= 1, data packets should have PSH|ACK flags
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let payload = b"hello";
-        let pkt = build_tcp_packet(
-            local, remote, 1, 1,
-            tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
-            Some(payload), StealthLevel::Basic, 1000, 500,
-            0xFFFF,
-        );
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(
-            tcp_pkt.get_flags(),
-            tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
-            "stealth >= 1 data packets should have PSH|ACK"
-        );
-        assert_eq!(tcp_pkt.payload(), payload);
-    }
-
-    #[test]
-    fn test_stealth_off_data_no_psh_flag() {
-        // With stealth 0, data packets should have only ACK (no PSH)
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let payload = b"data";
-        let pkt = build_tcp_packet(
-            local, remote, 1, 1,
-            tcp::TcpFlags::ACK,
-            Some(payload), StealthLevel::Off, 0, 0,
-            0xFFFF,
-        );
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_flags(), tcp::TcpFlags::ACK, "stealth 0 should use plain ACK");
-        assert_eq!(tcp_pkt.get_flags() & tcp::TcpFlags::PSH, 0, "stealth 0 should not have PSH");
-    }
-
-    #[test]
-    fn test_stealth_basic_psh_ack_ipv6() {
-        // PSH|ACK should also work for IPv6
-        let local: SocketAddr = "[fd00::1]:1234".parse().unwrap();
-        let remote: SocketAddr = "[fd00::2]:5678".parse().unwrap();
-        let payload = b"ipv6 data";
-        let pkt = build_tcp_packet(
-            local, remote, 100, 200,
-            tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
-            Some(payload), StealthLevel::Basic, 2000, 1000,
-            0xFFFF,
-        );
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[40..]).unwrap();
-        assert_eq!(
-            tcp_pkt.get_flags(),
-            tcp::TcpFlags::PSH | tcp::TcpFlags::ACK,
-            "PSH|ACK should work for IPv6 packets"
-        );
-    }
-
-    #[test]
-    fn test_parse_tcp_timestamp_stealth_off_syn_returns_none() {
-        // Stealth Off SYN has NOP + wscale but no timestamps
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let pkt = build_tcp_packet(local, remote, 0, 0, tcp::TcpFlags::SYN, None, StealthLevel::Off, 0, 0, 0xFFFF);
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        let parsed = parse_tcp_timestamps(&tcp_pkt).map(|(tsval, _)| tsval);
-        assert_eq!(parsed, None);
-    }
-
-    // --- Task 7: Dynamic window (Level 2) ---
-
-    #[test]
-    fn test_stealth_standard_window_varies_between_packets() {
-        // With stealth >= 2, window should vary between packets (not static 0xFFFF)
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        // Build multiple packets with different window values (simulating Socket jitter)
-        let windows: Vec<u16> = (0..20).map(|i| {
-            let window = 300 + (i % 32); // simulate base + jitter
-            let pkt = build_tcp_packet(
-                local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
-                StealthLevel::Standard, 1000, 500, window,
-            );
-            let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-            tcp_pkt.get_window()
-        }).collect();
-        // Verify none are 0xFFFF
-        for w in &windows {
-            assert_ne!(*w, 0xFFFF, "stealth Standard window should not be static 0xFFFF");
-        }
-        // Verify at least some variation exists
-        let unique: std::collections::HashSet<u16> = windows.into_iter().collect();
-        assert!(unique.len() > 1, "window values should vary between packets");
-    }
-
-    #[test]
-    fn test_stealth_standard_window_in_realistic_range() {
-        // Window should be in a realistic range (256-544 with wscale=7 means ~32K-70K effective)
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        for window in [256u16, 300, 400, 512, 540] {
-            let pkt = build_tcp_packet(
-                local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
-                StealthLevel::Standard, 1000, 500, window,
-            );
-            let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-            let w = tcp_pkt.get_window();
-            assert_eq!(w, window, "window field should match passed value");
-            // With wscale=7: effective = w * 128
-            let effective = (w as u32) * 128;
-            assert!(effective >= 32768, "effective window should be >= 32KB, got {}", effective);
-            assert!(effective <= 131072, "effective window should be <= 128KB, got {}", effective);
-        }
-    }
-
-    #[test]
-    fn test_stealth_off_keeps_static_window() {
-        // Stealth Off must keep static 0xFFFF window
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let pkt = build_tcp_packet(
-            local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
-            StealthLevel::Off, 0, 0, 0xFFFF,
-        );
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_window(), 0xFFFF, "stealth Off should have static 0xFFFF window");
-    }
-
-    #[test]
-    fn test_stealth_basic_keeps_static_window() {
-        // Stealth Basic (level 1) must also keep static 0xFFFF window
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let pkt = build_tcp_packet(
-            local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
-            StealthLevel::Basic, 1000, 500, 0xFFFF,
-        );
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_window(), 0xFFFF, "stealth Basic should have static 0xFFFF window");
-    }
-
-    #[test]
-    fn test_stealth_window_on_syn_packet() {
-        // SYN packet with stealth >= 2 should also use dynamic window
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let window = 350u16;
-        let pkt = build_tcp_packet(
-            local, remote, 0, 0, tcp::TcpFlags::SYN, None,
-            StealthLevel::Standard, 1000, 0, window,
-        );
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert_eq!(tcp_pkt.get_window(), window, "SYN packet should use provided window value");
-    }
-
-    #[test]
-    fn test_stealth_window_checksum_valid() {
-        // Verify checksum is correct with non-0xFFFF window
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let payload = b"window test";
-        let pkt = build_tcp_packet(
-            local, remote, 100, 200, tcp::TcpFlags::ACK, Some(payload),
-            StealthLevel::Standard, 5000, 3000, 400,
-        );
-        let tcp_len = pkt.len() - 20;
-        let mut tcp_bytes = pkt[20..].to_vec();
-        let stored_cksm = tcp::TcpPacket::new(&tcp_bytes).unwrap().get_checksum();
-        tcp_bytes[16] = 0;
-        tcp_bytes[17] = 0;
-        let ip::IpNextHeaderProtocol(proto) = ip::IpNextHeaderProtocols::Tcp;
-        let mut cksm = Checksum::new();
-        cksm.add_bytes(&[10, 0, 0, 1]);
-        cksm.add_bytes(&[10, 0, 0, 2]);
-        cksm.add_bytes(&[0, proto, (tcp_len >> 8) as u8, (tcp_len & 0xFF) as u8]);
-        cksm.add_bytes(&tcp_bytes);
-        assert_eq!(stored_cksm, u16::from_be_bytes(cksm.checksum()));
-    }
-
-    // --- Task 8: ts_ecr echo correctness (Level 2) ---
-
-    #[test]
-    fn test_tsecr_matches_peer_tsval_exactly() {
-        // Simulate: peer sends packet with tsval=99999, we parse it and echo it back
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let peer_tsval = 99999u32;
-
-        // Peer's outgoing packet (from peer's perspective: their tsval, their tsecr)
-        let peer_pkt = build_tcp_packet(
-            remote, local, 1, 1, tcp::TcpFlags::ACK, Some(b"hello"),
-            StealthLevel::Basic, peer_tsval, 50000, 0xFFFF,
-        );
-        // Parse the peer's tsval from their packet
-        let tcp_pkt = tcp::TcpPacket::new(&peer_pkt[20..]).unwrap();
-        let extracted_tsval = parse_tcp_timestamps(&tcp_pkt).map(|(tsval, _)| tsval).expect("should parse peer tsval");
-        assert_eq!(extracted_tsval, peer_tsval, "extracted tsval must match peer's tsval exactly");
-
-        // Now build our response echoing it as ts_ecr
-        let our_pkt = build_tcp_packet(
-            local, remote, 1, 2, tcp::TcpFlags::ACK, Some(b"world"),
-            StealthLevel::Basic, 60000, extracted_tsval, 0xFFFF,
-        );
-        let our_tcp = tcp::TcpPacket::new(&our_pkt[20..]).unwrap();
-        let (_, our_tsecr) = parse_tcp_timestamps(&our_tcp).expect("should have timestamps");
-        assert_eq!(our_tsecr, peer_tsval, "outgoing ts_ecr must match last received peer tsval exactly");
-    }
-
-    #[test]
-    fn test_tsecr_reflects_latest_after_multiple_packets() {
-        // Simulate receiving multiple packets with increasing tsval; ts_ecr should reflect the latest
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-
-        let peer_tsvals = [10000u32, 20000, 30000, 40000, 50000];
-        let mut latest_peer_tsval = 0u32;
-
-        for &peer_tsval in &peer_tsvals {
-            // Peer sends a packet
-            let peer_pkt = build_tcp_packet(
-                remote, local, 1, 1, tcp::TcpFlags::ACK, Some(b"data"),
-                StealthLevel::Basic, peer_tsval, latest_peer_tsval, 0xFFFF,
-            );
-            let tcp_pkt = tcp::TcpPacket::new(&peer_pkt[20..]).unwrap();
-            let extracted = parse_tcp_timestamps(&tcp_pkt).map(|(tsval, _)| tsval).expect("should parse");
-            // Simulate Socket updating ts_ecr
-            latest_peer_tsval = extracted;
-        }
-
-        // After all packets, ts_ecr should be the last peer tsval
-        assert_eq!(latest_peer_tsval, 50000, "ts_ecr should reflect the latest peer tsval");
-
-        // Build our response with the latest ts_ecr
-        let our_pkt = build_tcp_packet(
-            local, remote, 1, 6, tcp::TcpFlags::ACK, Some(b"resp"),
-            StealthLevel::Basic, 70000, latest_peer_tsval, 0xFFFF,
-        );
-        let our_tcp = tcp::TcpPacket::new(&our_pkt[20..]).unwrap();
-        let (_, our_tsecr) = parse_tcp_timestamps(&our_tcp).expect("should have timestamps");
-        assert_eq!(our_tsecr, 50000, "ts_ecr must reflect the latest (most recent) peer tsval");
-    }
-
-    #[test]
-    fn test_tsecr_atomic_store_load_consistent() {
-        // Verify that AtomicU32 store/load pattern preserves exact ts_ecr values
-        // This mirrors Socket's usage: store on recv, load on send
-        use std::sync::atomic::{AtomicU32, Ordering};
-
-        let ts_ecr = AtomicU32::new(0);
-
-        // Simulate recv updating ts_ecr
-        ts_ecr.store(123456789, Ordering::Relaxed);
-        assert_eq!(ts_ecr.load(Ordering::Relaxed), 123456789);
-
-        // Simulate second recv with different value
-        ts_ecr.store(987654321, Ordering::Relaxed);
-        assert_eq!(ts_ecr.load(Ordering::Relaxed), 987654321);
-
-        // Verify max u32 value works (edge case)
-        ts_ecr.store(u32::MAX, Ordering::Relaxed);
-        assert_eq!(ts_ecr.load(Ordering::Relaxed), u32::MAX);
-    }
-
-    #[test]
-    fn test_handshake_tsecr_flow_syn_ecr_zero() {
-        // SYN: ts_ecr must be 0 (no peer timestamp received yet)
-        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-
-        let syn = build_tcp_packet(
-            local, remote, 0x12345678, 0, tcp::TcpFlags::SYN, None,
-            StealthLevel::Basic, 1000, 0, 0xFFFF,
-        );
-        let syn_tcp = tcp::TcpPacket::new(&syn[20..]).unwrap();
-        let (syn_tsval, syn_tsecr) = parse_tcp_timestamps(&syn_tcp).expect("SYN should have timestamps");
-        assert_eq!(syn_tsval, 1000, "SYN tsval should be set");
-        assert_eq!(syn_tsecr, 0, "SYN ts_ecr must be 0 (no prior peer timestamp)");
-    }
-
-    #[test]
-    fn test_handshake_tsecr_flow_syn_ack_echoes_peer() {
-        // SYN+ACK: ts_ecr should echo the client's SYN tsval
-        let client: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let server: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let client_tsval = 1000u32;
-
-        // Client sends SYN
-        let syn = build_tcp_packet(
-            client, server, 0x11111111, 0, tcp::TcpFlags::SYN, None,
-            StealthLevel::Basic, client_tsval, 0, 0xFFFF,
-        );
-        // Server parses SYN and extracts client's tsval
-        let syn_tcp = tcp::TcpPacket::new(&syn[20..]).unwrap();
-        let peer_tsval = parse_tcp_timestamps(&syn_tcp).map(|(tsval, _)| tsval).expect("should extract client tsval from SYN");
-        assert_eq!(peer_tsval, client_tsval);
-
-        // Server sends SYN+ACK, echoing client's tsval
-        let syn_ack = build_tcp_packet(
-            server, client, 0x22222222, 0x11111112,
-            tcp::TcpFlags::SYN | tcp::TcpFlags::ACK, None,
-            StealthLevel::Basic, 2000, peer_tsval, 0xFFFF,
-        );
-        let syn_ack_tcp = tcp::TcpPacket::new(&syn_ack[20..]).unwrap();
-        let (sa_tsval, sa_tsecr) = parse_tcp_timestamps(&syn_ack_tcp).expect("SYN+ACK should have timestamps");
-        assert_eq!(sa_tsval, 2000, "SYN+ACK should have server's tsval");
-        assert_eq!(sa_tsecr, client_tsval, "SYN+ACK ts_ecr must echo client's SYN tsval");
-    }
-
-    #[test]
-    fn test_handshake_tsecr_flow_ack_echoes_server() {
-        // Full 3-way handshake ts_ecr flow verification
-        let client: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let server: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-
-        // Step 1: Client SYN (ts_ecr=0)
-        let client_tsval_1 = 1000u32;
-        let syn = build_tcp_packet(
-            client, server, 0x11111111, 0, tcp::TcpFlags::SYN, None,
-            StealthLevel::Basic, client_tsval_1, 0, 0xFFFF,
-        );
-        let syn_tcp = tcp::TcpPacket::new(&syn[20..]).unwrap();
-        let server_sees_client_ts = parse_tcp_timestamps(&syn_tcp).map(|(tsval, _)| tsval).unwrap();
-
-        // Step 2: Server SYN+ACK (ts_ecr = client's tsval)
-        let server_tsval_1 = 2000u32;
-        let syn_ack = build_tcp_packet(
-            server, client, 0x22222222, 0x11111112,
-            tcp::TcpFlags::SYN | tcp::TcpFlags::ACK, None,
-            StealthLevel::Basic, server_tsval_1, server_sees_client_ts, 0xFFFF,
-        );
-        let syn_ack_tcp = tcp::TcpPacket::new(&syn_ack[20..]).unwrap();
-        let client_sees_server_ts = parse_tcp_timestamps(&syn_ack_tcp).map(|(tsval, _)| tsval).unwrap();
-        let (_, sa_ecr) = parse_tcp_timestamps(&syn_ack_tcp).unwrap();
-        assert_eq!(sa_ecr, client_tsval_1, "SYN+ACK ecr = client SYN tsval");
-
-        // Step 3: Client ACK (ts_ecr = server's tsval from SYN+ACK)
-        let client_tsval_2 = 1050u32;
-        let ack = build_tcp_packet(
-            client, server, 0x11111112, 0x22222223, tcp::TcpFlags::ACK, None,
-            StealthLevel::Basic, client_tsval_2, client_sees_server_ts, 0xFFFF,
-        );
-        let ack_tcp = tcp::TcpPacket::new(&ack[20..]).unwrap();
-        let (ack_tsval, ack_tsecr) = parse_tcp_timestamps(&ack_tcp).expect("ACK should have timestamps");
-        assert_eq!(ack_tsval, client_tsval_2, "ACK tsval is client's current timestamp");
-        assert_eq!(ack_tsecr, server_tsval_1, "ACK ts_ecr must echo server's SYN+ACK tsval");
-    }
-
-    #[test]
     fn test_parse_tcp_timestamps_returns_both_values() {
-        // Verify the new parse_tcp_timestamps helper extracts both tsval and tsecr
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
         let pkt = build_tcp_packet(
             local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"x"),
-            StealthLevel::Basic, 11111, 22222, 0xFFFF,
+            11111, 22222, 0xFFFF,
         );
         let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
         let (tsval, tsecr) = parse_tcp_timestamps(&tcp_pkt).expect("should parse both");
@@ -1357,14 +810,38 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tcp_timestamps_stealth_off_returns_none() {
+    fn test_timestamps_monotonically_increasing() {
         let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
-        let pkt = build_tcp_packet(
-            local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"x"),
-            StealthLevel::Off, 0, 0, 0xFFFF,
+        let pkt1 = build_tcp_packet(local, remote, 1, 1, tcp::TcpFlags::ACK, Some(b"a"), 1000, 0, 0xFFFF);
+        let pkt2 = build_tcp_packet(local, remote, 2, 1, tcp::TcpFlags::ACK, Some(b"b"), 1050, 0, 0xFFFF);
+        let opts1 = tcp::TcpPacket::new(&pkt1[20..]).unwrap().get_options_raw().to_vec();
+        let opts2 = tcp::TcpPacket::new(&pkt2[20..]).unwrap().get_options_raw().to_vec();
+        let ts1 = u32::from_be_bytes([opts1[4], opts1[5], opts1[6], opts1[7]]);
+        let ts2 = u32::from_be_bytes([opts2[4], opts2[5], opts2[6], opts2[7]]);
+        assert!(ts2 > ts1, "timestamps should be monotonically increasing: {} > {}", ts2, ts1);
+    }
+
+    #[test]
+    fn test_tsecr_matches_peer_tsval_exactly() {
+        let local: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let remote: SocketAddr = "10.0.0.2:5678".parse().unwrap();
+        let peer_tsval = 99999u32;
+
+        let peer_pkt = build_tcp_packet(
+            remote, local, 1, 1, tcp::TcpFlags::ACK, Some(b"hello"),
+            peer_tsval, 50000, 0xFFFF,
         );
-        let tcp_pkt = tcp::TcpPacket::new(&pkt[20..]).unwrap();
-        assert!(parse_tcp_timestamps(&tcp_pkt).is_none(), "stealth Off has no timestamps");
+        let tcp_pkt = tcp::TcpPacket::new(&peer_pkt[20..]).unwrap();
+        let extracted_tsval = parse_tcp_timestamps(&tcp_pkt).map(|(tsval, _)| tsval).expect("should parse peer tsval");
+        assert_eq!(extracted_tsval, peer_tsval);
+
+        let our_pkt = build_tcp_packet(
+            local, remote, 1, 2, tcp::TcpFlags::ACK, Some(b"world"),
+            60000, extracted_tsval, 0xFFFF,
+        );
+        let our_tcp = tcp::TcpPacket::new(&our_pkt[20..]).unwrap();
+        let (_, our_tsecr) = parse_tcp_timestamps(&our_tcp).expect("should have timestamps");
+        assert_eq!(our_tsecr, peer_tsval, "outgoing ts_ecr must match last received peer tsval exactly");
     }
 }
