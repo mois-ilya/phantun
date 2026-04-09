@@ -207,7 +207,8 @@ async fn main() -> io::Result<()> {
 
     let main_loop = tokio::spawn(async move {
         let mut buf_udp = [0u8; MAX_PACKET_LEN];
-        let mut buf_tcp = [0u8; MAX_PACKET_LEN];
+        // buf_tcp must fit an encoded packet: payload (up to MAX_PACKET_LEN) + ENCODE_OVERHEAD
+        let mut buf_tcp = [0u8; MAX_PACKET_LEN + ENCODE_OVERHEAD];
 
         loop {
             let sock = Arc::new(stack.accept().await);
