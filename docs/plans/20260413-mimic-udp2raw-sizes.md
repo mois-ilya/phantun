@@ -100,20 +100,20 @@ pub fn decode(key: &[u8], data: &[u8]) -> Option<DecodedMessage>;
 **Files:**
 - Modify: `phantun/src/bin/client.rs`
 
-- [ ] обновить константы: `ENCODE_OVERHEAD: usize = 9` (было 11), удалить `MAX_PAD`
-- [ ] `encode_payload(key, payload)` — упростить, убрать `max_pad` расчёт, вызывать `xor::encode(k, payload)`
-- [ ] `decode_payload(key, data) -> Option<Vec<u8>>` — теперь возвращает `Option`:
+- [x] обновить константы: `ENCODE_OVERHEAD: usize = 9` (было 11), удалить `MAX_PAD`
+- [x] `encode_payload(key, payload)` — упростить, убрать `max_pad` расчёт, вызывать `xor::encode(k, payload)`
+- [x] `decode_payload(key, data) -> Option<Vec<u8>>` — теперь возвращает `Option`:
   - `Some(Data(v))` → `Some(v)`
   - `Some(Heartbeat)` → `None` (вызывающий сторонний код пропускает)
   - `None` (decode failed) → `None`
-- [ ] в получающем коде (`sock.recv` → UDP send): если `decode_payload` вернул `None` — не слать в UDP, просто продолжить (без логирования, чтобы не шуметь — hb'ы частые)
-- [ ] добавить heartbeat task: `tokio::spawn` внутри per-connection block (рядом с fastpath task, cancel через `quit` token)
-  - interval 1 секунда (`tokio::time::interval`)
+- [x] в получающем коде (`sock.recv` → UDP send): если `decode_payload` вернул `None` — не слать в UDP, просто продолжить (без логирования, чтобы не шуметь — hb'ы частые)
+- [x] добавить heartbeat task: `tokio::spawn` внутри per-connection block (рядом с fastpath task, cancel через `quit` token)
+  - interval 600ms (`tokio::time::interval`) — как у udp2raw
   - на каждый tick: если `key.is_some()` — сгенерировать `encode_heartbeat(k, 1200)` и `sock.send`
   - если key отсутствует — таск не спавнить (hb только при XOR)
-- [ ] добавить константу `HEARTBEAT_SIZE: usize = 1200` и `HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1)`
-- [ ] verify compiles: `cargo build --bin phantun-client` (через Docker)
-- [ ] интеграционных тестов phantun нет — ручная проверка после Task 4
+- [x] добавить константу `HEARTBEAT_SIZE: usize = 1200` и `HEARTBEAT_INTERVAL: Duration = Duration::from_millis(600)` (совпадает с udp2raw `heartbeat_interval = 600ms` из `misc.h:48`)
+- [x] verify compiles: `cargo build --bin client` (через Docker)
+- [x] интеграционных тестов phantun нет — ручная проверка после Task 4
 
 ### Task 3: Update server.rs — symmetric changes
 
@@ -123,7 +123,7 @@ pub fn decode(key: &[u8], data: &[u8]) -> Option<DecodedMessage>;
 - [ ] те же изменения констант: `ENCODE_OVERHEAD = 9`, убрать `MAX_PAD`
 - [ ] упростить `encode_payload` и обновить `decode_payload` (аналогично client)
 - [ ] filter heartbeat на recv-path (не слать в UDP бэкенд)
-- [ ] добавить heartbeat task в per-connection scope с теми же параметрами (1200 байт / 1с)
+- [ ] добавить heartbeat task в per-connection scope с теми же параметрами (1200 байт / 600ms)
 - [ ] verify compiles: `cargo build --bin phantun-server` (через Docker)
 
 ### Task 4: Verify acceptance criteria
@@ -132,7 +132,7 @@ pub fn decode(key: &[u8], data: &[u8]) -> Option<DecodedMessage>;
 - [ ] clippy чист: `cargo clippy --verbose` (в Docker)
 - [ ] ручная проверка сборки обоих бинарников
 - [ ] размер overhead в XOR envelope = 9 байт (было 11)
-- [ ] при работе с ключом: heartbeat шлётся 1 раз в секунду с обеих сторон
+- [ ] при работе с ключом: heartbeat шлётся каждые 600ms с обеих сторон (как у udp2raw)
 - [ ] при работе без ключа: heartbeat не шлётся (логика не ломается)
 
 ### Task 5: Update documentation and backlog
@@ -208,4 +208,4 @@ match xor::decode(key, tcp_payload) {
 
 **Related future work:**
 - delayed ACK (уже в `backlog.md`) — если после этих изменений ТСПУ всё ещё блокирует, приоритет станет выше
-- heartbeat jitter (сейчас строго 1 сек) — если ТСПУ ловит на идеальной периодичности
+- heartbeat jitter (сейчас строго 600ms, как у udp2raw) — если ТСПУ ловит на идеальной периодичности; но udp2raw тоже без jitter'а, так что приоритет низкий

@@ -9,6 +9,7 @@ use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
 use tokio::time;
 use tokio_tun::TunBuilder;
@@ -17,6 +18,8 @@ use tokio_util::sync::CancellationToken;
 use phantun::UDP_TTL;
 
 const ENCODE_OVERHEAD: usize = 9; // 8 IV + 1 marker
+const HEARTBEAT_SIZE: usize = 1200;
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(600);
 
 fn encode_payload(key: &Option<Vec<u8>>, payload: &[u8]) -> Vec<u8> {
     match key {
@@ -25,13 +28,16 @@ fn encode_payload(key: &Option<Vec<u8>>, payload: &[u8]) -> Vec<u8> {
     }
 }
 
-fn decode_payload(key: &Option<Vec<u8>>, data: &[u8]) -> Vec<u8> {
+/// Decode incoming packet. Returns `None` for heartbeat or decode failure
+/// (caller should skip UDP forwarding). With no key, returns passthrough data.
+fn decode_payload(key: &Option<Vec<u8>>, data: &[u8]) -> Option<Vec<u8>> {
     match key {
         Some(k) => match xor::decode(k, data) {
-            Some(xor::DecodedMessage::Data(v)) => v,
-            _ => Vec::new(),
+            Some(xor::DecodedMessage::Data(v)) => Some(v),
+            Some(xor::DecodedMessage::Heartbeat) => None,
+            None => None,
         },
-        None => data.to_vec(),
+        None => Some(data.to_vec()),
     }
 }
 
@@ -308,12 +314,14 @@ async fn main() -> io::Result<()> {
                                 match res {
                                     Some(size) => {
                                         if size > 0 {
-                                            let decoded = decode_payload(&key, &buf_tcp[..size]);
-                                            if let Err(e) = udp_sock.send(&decoded).await {
-                                                error!("Unable to send UDP packet to {}: {}, closing connection", e, remote_addr);
-                                                quit.cancel();
-                                                return;
+                                            if let Some(decoded) = decode_payload(&key, &buf_tcp[..size]) {
+                                                if let Err(e) = udp_sock.send(&decoded).await {
+                                                    error!("Unable to send UDP packet to {}: {}, closing connection", e, remote_addr);
+                                                    quit.cancel();
+                                                    return;
+                                                }
                                             }
+                                            // None = heartbeat or decode failure; skip silently
                                         }
                                     },
                                     None => {
@@ -330,6 +338,35 @@ async fn main() -> io::Result<()> {
                                 return;
                             },
                         };
+                    }
+                });
+            }
+
+            // heartbeat task — only when XOR key is set (without key, receiver
+            // cannot distinguish heartbeat filler from real UDP payload)
+            if key.is_some() {
+                let sock_hb = sock.clone();
+                let quit_hb = quit.clone();
+                let key_hb = key.clone();
+                tokio::spawn(async move {
+                    let mut interval = time::interval(HEARTBEAT_INTERVAL);
+                    // skip the immediate first tick — no point beating right after connect
+                    interval.tick().await;
+                    loop {
+                        tokio::select! {
+                            _ = interval.tick() => {
+                                if let Some(ref k) = *key_hb {
+                                    let hb = xor::encode_heartbeat(k, HEARTBEAT_SIZE);
+                                    if sock_hb.send(&hb).await.is_none() {
+                                        quit_hb.cancel();
+                                        return;
+                                    }
+                                }
+                            },
+                            _ = quit_hb.cancelled() => {
+                                return;
+                            },
+                        }
                     }
                 });
             }
