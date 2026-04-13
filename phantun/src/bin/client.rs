@@ -3,54 +3,19 @@ use fake_tcp::packet::MAX_PACKET_LEN;
 use fake_tcp::{Socket, Stack};
 use log::{debug, error, info, trace};
 use phantun::utils::{assign_ipv6_address, new_udp_reuseport, udp_recv_pktinfo};
+use phantun::wire::{Incoming, HEARTBEAT_INTERVAL, HEARTBEAT_SIZE, classify_incoming, encode_payload};
 use phantun::xor;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
 use tokio::time;
 use tokio_tun::TunBuilder;
 use tokio_util::sync::CancellationToken;
 
 use phantun::UDP_TTL;
-
-const HEARTBEAT_SIZE: usize = 1200;
-const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(600);
-
-/// Encode outgoing payload. Returns a borrowed slice when no key is set
-/// (zero-alloc hot path) and an owned encoded buffer otherwise.
-fn encode_payload<'a>(key: &Option<Arc<Vec<u8>>>, payload: &'a [u8]) -> Cow<'a, [u8]> {
-    match key {
-        Some(k) => Cow::Owned(xor::encode(k, payload)),
-        None => Cow::Borrowed(payload),
-    }
-}
-
-/// Classification of an incoming TCP payload, for the recv hot path.
-enum Incoming<'a> {
-    /// Decoded data to forward on to UDP (borrowed when no key, owned when decoded).
-    Data(Cow<'a, [u8]>),
-    /// Valid heartbeat — discard silently.
-    Heartbeat,
-    /// Decode failed (bad marker / too short / wrong key).
-    DecodeFailed,
-}
-
-/// Classify an incoming payload. With no key, always `Incoming::Data` (zero-alloc).
-fn classify_incoming<'a>(key: &Option<Arc<Vec<u8>>>, data: &'a [u8]) -> Incoming<'a> {
-    match key {
-        Some(k) => match xor::decode(k, data) {
-            Some(xor::DecodedMessage::Data(v)) => Incoming::Data(Cow::Owned(v)),
-            Some(xor::DecodedMessage::Heartbeat) => Incoming::Heartbeat,
-            None => Incoming::DecodeFailed,
-        },
-        None => Incoming::Data(Cow::Borrowed(data)),
-    }
-}
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -345,7 +310,7 @@ async fn main() -> io::Result<()> {
                                                 }
                                                 Incoming::Heartbeat => {}
                                                 Incoming::DecodeFailed => {
-                                                    trace!("client: xor decode failed for {} bytes (key mismatch?)", size);
+                                                    trace!("xor decode failed for {} bytes (key mismatch?)", size);
                                                 }
                                             }
                                         }

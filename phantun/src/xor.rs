@@ -19,11 +19,14 @@
 
 use rand::{RngCore, random};
 
+/// IV length in bytes, placed at the head of each envelope.
+const IV_SIZE: usize = 8;
+
 /// Fixed envelope overhead: 8-byte IV + 1-byte marker.
 ///
 /// Exposed so binaries can size receive buffers correctly without duplicating
 /// the constant (previously there were three separate copies that could drift).
-pub const OVERHEAD: usize = 9; // 8 IV + 1 marker
+pub const OVERHEAD: usize = IV_SIZE + 1;
 const MARKER_DATA: u8 = b'b';
 const MARKER_HEARTBEAT: u8 = b'h';
 
@@ -43,7 +46,7 @@ fn xor_apply(key: &[u8], data: &mut [u8]) {
 }
 
 fn encode_with_marker(key: &[u8], marker: u8, body: &[u8]) -> Vec<u8> {
-    let iv: [u8; 8] = random();
+    let iv: [u8; IV_SIZE] = random();
     let mut buf = Vec::with_capacity(OVERHEAD + body.len());
     buf.extend_from_slice(&iv);
     buf.push(marker);
@@ -59,10 +62,10 @@ pub fn encode(key: &[u8], payload: &[u8]) -> Vec<u8> {
 
 /// Encode a heartbeat packet (marker 'h') containing `size` bytes of random filler.
 pub fn encode_heartbeat(key: &[u8], size: usize) -> Vec<u8> {
-    let iv: [u8; 8] = random();
+    let iv: [u8; IV_SIZE] = random();
     let mut buf = vec![0u8; OVERHEAD + size];
-    buf[..8].copy_from_slice(&iv);
-    buf[8] = MARKER_HEARTBEAT;
+    buf[..IV_SIZE].copy_from_slice(&iv);
+    buf[IV_SIZE] = MARKER_HEARTBEAT;
     if size > 0 {
         rand::rng().fill_bytes(&mut buf[OVERHEAD..]);
     }
@@ -82,7 +85,7 @@ pub fn decode(key: &[u8], data: &[u8]) -> Option<DecodedMessage> {
     }
     // Classify by XOR'ing just the marker byte first — avoids any allocation
     // for heartbeat/reject paths (heartbeat runs every 600ms).
-    let marker = data[8] ^ key[8 % key.len()];
+    let marker = data[IV_SIZE] ^ key[IV_SIZE % key.len()];
     match marker {
         MARKER_HEARTBEAT => Some(DecodedMessage::Heartbeat),
         MARKER_DATA => {
@@ -166,7 +169,7 @@ mod tests {
         // Boundary: buf.len() == OVERHEAD (9). Zero-length body.
         // Craft an envelope with an unknown marker and verify rejection.
         let mut buf = vec![0u8; OVERHEAD];
-        buf[8] = b'z';
+        buf[IV_SIZE] = b'z';
         xor_apply(KEY, &mut buf);
         assert_eq!(buf.len(), OVERHEAD);
         assert!(decode(KEY, &buf).is_none());
@@ -224,7 +227,7 @@ mod tests {
         // Build an envelope with a deliberately wrong marker byte, then XOR-encrypt.
         let mut buf = vec![0u8; OVERHEAD];
         // IV = zeros is fine for this test.
-        buf[8] = b'x'; // unknown marker
+        buf[IV_SIZE] = b'x'; // unknown marker
         xor_apply(KEY, &mut buf);
         assert!(decode(KEY, &buf).is_none());
     }
