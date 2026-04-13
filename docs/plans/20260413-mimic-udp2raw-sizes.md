@@ -82,18 +82,18 @@ pub fn encode_heartbeat(key: &[u8], size: usize) -> Vec<u8>;
 pub fn decode(key: &[u8], data: &[u8]) -> Option<DecodedMessage>;
 ```
 
-- [ ] переписать `xor.rs`: новый формат envelope без `pad_len`
-- [ ] реализовать `encode(key, payload)` — marker 'b'
-- [ ] реализовать `encode_heartbeat(key, size)` — marker 'h' + `size` random bytes
-- [ ] реализовать `decode` возвращающий `Option<DecodedMessage>`
-- [ ] обновить docstring в начале файла
-- [ ] написать unit-тест: encode/decode round-trip для Data
-- [ ] написать unit-тест: encode_heartbeat → decode возвращает Heartbeat
-- [ ] написать unit-тест: decode с неверным ключом → None
-- [ ] написать unit-тест: decode со слишком коротким буфером → None
-- [ ] написать unit-тест: decode с неизвестным marker → None
-- [ ] `cargo clippy -p phantun --verbose` — чисто
-- [ ] `./scripts/run-tests.sh` — все тесты проходят
+- [x] переписать `xor.rs`: новый формат envelope без `pad_len`
+- [x] реализовать `encode(key, payload)` — marker 'b'
+- [x] реализовать `encode_heartbeat(key, size)` — marker 'h' + `size` random bytes
+- [x] реализовать `decode` возвращающий `Option<DecodedMessage>`
+- [x] обновить docstring в начале файла
+- [x] написать unit-тест: encode/decode round-trip для Data
+- [x] написать unit-тест: encode_heartbeat → decode возвращает Heartbeat
+- [x] написать unit-тест: decode с неверным ключом → None
+- [x] написать unit-тест: decode со слишком коротким буфером → None
+- [x] написать unit-тест: decode с неизвестным marker → None
+- [x] `cargo clippy -p phantun --verbose` — чисто (pre-existing collapsible_if warnings in server.rs unrelated to this task; xor.rs + lib clippy-clean)
+- [x] `./scripts/run-tests.sh` — все тесты проходят (fake-tcp 49 unit + 12 integration; phantun xor 8 unit tests)
 
 ### Task 2: Update client.rs — use new xor API, add heartbeat task
 

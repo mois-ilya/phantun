@@ -16,25 +16,21 @@ use tokio_util::sync::CancellationToken;
 
 use phantun::UDP_TTL;
 
-const MAX_PAD: usize = 128;
-const ENCODE_OVERHEAD: usize = 11; // 8 IV + 2 pad_len + 1 'b'
+const ENCODE_OVERHEAD: usize = 9; // 8 IV + 1 marker
 
 fn encode_payload(key: &Option<Vec<u8>>, payload: &[u8]) -> Vec<u8> {
     match key {
-        Some(k) => {
-            let max_pad = MAX_PACKET_LEN
-                .saturating_sub(ENCODE_OVERHEAD)
-                .saturating_sub(payload.len())
-                .min(MAX_PAD) as u16;
-            xor::encode(k, payload, max_pad)
-        }
+        Some(k) => xor::encode(k, payload),
         None => payload.to_vec(),
     }
 }
 
 fn decode_payload(key: &Option<Vec<u8>>, data: &[u8]) -> Option<Vec<u8>> {
     match key {
-        Some(k) => xor::decode(k, data),
+        Some(k) => match xor::decode(k, data) {
+            Some(xor::DecodedMessage::Data(v)) => Some(v),
+            _ => None,
+        },
         None => Some(data.to_vec()),
     }
 }
