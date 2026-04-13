@@ -1,7 +1,7 @@
 use clap::{crate_version, Arg, ArgAction, Command};
 use fake_tcp::packet::MAX_PACKET_LEN;
 use fake_tcp::{Socket, Stack};
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use phantun::utils::{assign_ipv6_address, new_udp_reuseport, udp_recv_pktinfo};
 use phantun::xor;
 use std::collections::HashMap;
@@ -21,23 +21,32 @@ const ENCODE_OVERHEAD: usize = 9; // 8 IV + 1 marker
 const HEARTBEAT_SIZE: usize = 1200;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(600);
 
-fn encode_payload(key: &Option<Vec<u8>>, payload: &[u8]) -> Vec<u8> {
+fn encode_payload(key: &Option<Arc<Vec<u8>>>, payload: &[u8]) -> Vec<u8> {
     match key {
         Some(k) => xor::encode(k, payload),
         None => payload.to_vec(),
     }
 }
 
-/// Decode incoming packet. Returns `None` for heartbeat or decode failure
-/// (caller should skip UDP forwarding). With no key, returns passthrough data.
-fn decode_payload(key: &Option<Vec<u8>>, data: &[u8]) -> Option<Vec<u8>> {
+/// Classification of an incoming TCP payload, for the recv hot path.
+enum Incoming {
+    /// Decoded data to forward on to UDP.
+    Data(Vec<u8>),
+    /// Valid heartbeat — discard silently.
+    Heartbeat,
+    /// Decode failed (bad marker / too short / wrong key).
+    DecodeFailed,
+}
+
+/// Classify an incoming payload. With no key, always `Incoming::Data`.
+fn classify_incoming(key: &Option<Arc<Vec<u8>>>, data: &[u8]) -> Incoming {
     match key {
         Some(k) => match xor::decode(k, data) {
-            Some(xor::DecodedMessage::Data(v)) => Some(v),
-            Some(xor::DecodedMessage::Heartbeat) => None,
-            None => None,
+            Some(xor::DecodedMessage::Data(v)) => Incoming::Data(v),
+            Some(xor::DecodedMessage::Heartbeat) => Incoming::Heartbeat,
+            None => Incoming::DecodeFailed,
         },
-        None => Some(data.to_vec()),
+        None => Incoming::Data(data.to_vec()),
     }
 }
 
@@ -181,9 +190,9 @@ async fn main() -> io::Result<()> {
         .map(fs::read)
         .transpose()?;
 
-    let key: Arc<Option<Vec<u8>>> = Arc::new(
-        matches.get_one::<String>("key").map(|k| k.as_bytes().to_vec())
-    );
+    let key: Option<Arc<Vec<u8>>> = matches
+        .get_one::<String>("key")
+        .map(|k| Arc::new(k.as_bytes().to_vec()));
 
     let num_cpus = num_cpus::get();
     info!("{} cores available", num_cpus);
@@ -314,14 +323,19 @@ async fn main() -> io::Result<()> {
                                 match res {
                                     Some(size) => {
                                         if size > 0 {
-                                            if let Some(decoded) = decode_payload(&key, &buf_tcp[..size]) {
-                                                if let Err(e) = udp_sock.send(&decoded).await {
-                                                    error!("Unable to send UDP packet to {}: {}, closing connection", e, remote_addr);
-                                                    quit.cancel();
-                                                    return;
+                                            match classify_incoming(&key, &buf_tcp[..size]) {
+                                                Incoming::Data(decoded) => {
+                                                    if let Err(e) = udp_sock.send(&decoded).await {
+                                                        error!("Unable to send UDP packet to {}: {}, closing connection", e, remote_addr);
+                                                        quit.cancel();
+                                                        return;
+                                                    }
+                                                }
+                                                Incoming::Heartbeat => {}
+                                                Incoming::DecodeFailed => {
+                                                    trace!("client: xor decode failed for {} bytes (key mismatch?)", size);
                                                 }
                                             }
-                                            // None = heartbeat or decode failure; skip silently
                                         }
                                     },
                                     None => {
@@ -344,10 +358,10 @@ async fn main() -> io::Result<()> {
 
             // heartbeat task — only when XOR key is set (without key, receiver
             // cannot distinguish heartbeat filler from real UDP payload)
-            if key.is_some() {
+            if let Some(k) = key.as_ref() {
                 let sock_hb = sock.clone();
                 let quit_hb = quit.clone();
-                let key_hb = key.clone();
+                let key_hb: Arc<Vec<u8>> = k.clone();
                 tokio::spawn(async move {
                     let mut interval = time::interval(HEARTBEAT_INTERVAL);
                     // skip the immediate first tick — no point beating right after connect
@@ -355,12 +369,10 @@ async fn main() -> io::Result<()> {
                     loop {
                         tokio::select! {
                             _ = interval.tick() => {
-                                if let Some(ref k) = *key_hb {
-                                    let hb = xor::encode_heartbeat(k, HEARTBEAT_SIZE);
-                                    if sock_hb.send(&hb).await.is_none() {
-                                        quit_hb.cancel();
-                                        return;
-                                    }
+                                let hb = xor::encode_heartbeat(&key_hb, HEARTBEAT_SIZE);
+                                if sock_hb.send(&hb).await.is_none() {
+                                    quit_hb.cancel();
+                                    return;
                                 }
                             },
                             _ = quit_hb.cancelled() => {

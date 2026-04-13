@@ -9,6 +9,12 @@ Future work ideas — not planned yet, just captured for later.
 - Related: `RwLock<HashMap>` in `Shared::tuples` may become bottleneck at high connection counts
 - Prerequisite: stealth-performance benchmarks (20260404) should be done first as baseline
 
+## Heartbeat jitter (mimic-clean branch)
+- Current heartbeat cadence is strictly every 600ms on both ends (matches udp2raw)
+- If DPI starts keying on perfect periodicity, add ±N ms jitter (sleep ~600ms + Uniform(-50,50)ms)
+- Low priority — udp2raw itself ships without jitter and still passes ТСПУ
+- Related: `HEARTBEAT_INTERVAL` in `phantun/src/bin/client.rs` / `server.rs`
+
 ## Delayed ACK (mimic-clean branch)
 - Currently `recv()` does not send any standalone ACK — the ACK is piggybacked on the next outgoing data packet
 - This works for bidirectional tunnel traffic (AWG ping/pong) but breaks for prolonged unidirectional bursts

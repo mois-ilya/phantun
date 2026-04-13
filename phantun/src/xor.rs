@@ -10,6 +10,12 @@
 //! Overhead is a constant 9 bytes. Heartbeats use a fixed 1200-byte random filler so
 //! that on-wire packet sizes collapse into two buckets (data ≈ UDP payload + 9,
 //! heartbeat ≈ 1209), mimicking udp2raw's size pattern for DPI resistance.
+//!
+//! **Known limitation:** the marker byte is only 1 byte, so with a random IV a wrong
+//! key yields `'b'` or `'h'` with probability 2/256 ≈ 0.78%. Those packets will be
+//! accepted — Data frames with a corrupt payload get forwarded to UDP, Heartbeat
+//! frames are silently dropped. A magic/HMAC could close this, but is intentionally
+//! omitted to match udp2raw's lightweight envelope.
 
 use rand::{RngCore, random};
 
@@ -63,15 +69,26 @@ pub fn encode_heartbeat(key: &[u8], size: usize) -> Vec<u8> {
 /// Decode a packet: decrypt envelope and classify as Data or Heartbeat.
 /// Returns None if the buffer is too short or the marker byte is unknown
 /// (e.g., wrong key or corrupted data).
+///
+/// Hot path: only allocates for `Data` (a single `Vec` containing the decrypted
+/// payload). `Heartbeat` and rejection paths allocate nothing.
 pub fn decode(key: &[u8], data: &[u8]) -> Option<DecodedMessage> {
     if data.len() < OVERHEAD {
         return None;
     }
-    let mut buf = data.to_vec();
-    xor_apply(key, &mut buf);
-    match buf[8] {
-        MARKER_DATA => Some(DecodedMessage::Data(buf[OVERHEAD..].to_vec())),
+    // Classify by XOR'ing just the marker byte first — avoids any allocation
+    // for heartbeat/reject paths (heartbeat runs every 600ms).
+    let marker = data[8] ^ key[8 % key.len()];
+    match marker {
         MARKER_HEARTBEAT => Some(DecodedMessage::Heartbeat),
+        MARKER_DATA => {
+            let mut payload = data[OVERHEAD..].to_vec();
+            // Apply XOR starting at stream offset OVERHEAD.
+            for (i, byte) in payload.iter_mut().enumerate() {
+                *byte ^= key[(OVERHEAD + i) % key.len()];
+            }
+            Some(DecodedMessage::Data(payload))
+        }
         _ => None,
     }
 }
@@ -138,6 +155,64 @@ mod tests {
         assert!(decode(KEY, &[]).is_none());
         assert!(decode(KEY, &[0u8; 1]).is_none());
         assert!(decode(KEY, &[0u8; 8]).is_none());
+    }
+
+    #[test]
+    fn test_decode_exact_overhead_length_with_crafted_marker() {
+        // Boundary: buf.len() == OVERHEAD (9). Zero-length body.
+        // Craft an envelope with an unknown marker and verify rejection.
+        let mut buf = vec![0u8; OVERHEAD];
+        buf[8] = b'z';
+        xor_apply(KEY, &mut buf);
+        assert_eq!(buf.len(), OVERHEAD);
+        assert!(decode(KEY, &buf).is_none());
+
+        // Same boundary, but with a valid Heartbeat marker → accepted.
+        let encoded = encode_heartbeat(KEY, 0);
+        assert_eq!(encoded.len(), OVERHEAD);
+        assert_eq!(decode(KEY, &encoded), Some(DecodedMessage::Heartbeat));
+    }
+
+    #[test]
+    fn test_encode_produces_distinct_outputs_for_same_input() {
+        // IV must be random — encoding the same payload twice must yield
+        // different ciphertexts (otherwise IV randomness is broken).
+        let payload = b"identical payload";
+        let a = encode(KEY, payload);
+        let b = encode(KEY, payload);
+        assert_ne!(a, b, "encode must produce distinct outputs (random IV)");
+    }
+
+    #[test]
+    fn test_encode_heartbeat_produces_distinct_outputs() {
+        let a = encode_heartbeat(KEY, 1200);
+        let b = encode_heartbeat(KEY, 1200);
+        assert_ne!(a, b, "encode_heartbeat must produce distinct outputs");
+    }
+
+    #[test]
+    fn test_encode_heartbeat_filler_is_random() {
+        // Decrypt two heartbeats and verify their filler bodies differ and
+        // are not all-zero. Catches regressions where filler was left as
+        // default-zero bytes (marker-only packet).
+        const SIZE: usize = 1200;
+
+        fn decrypt_filler(buf: &[u8]) -> Vec<u8> {
+            let mut copy = buf.to_vec();
+            xor_apply(KEY, &mut copy);
+            copy[OVERHEAD..].to_vec()
+        }
+
+        let a = decrypt_filler(&encode_heartbeat(KEY, SIZE));
+        let b = decrypt_filler(&encode_heartbeat(KEY, SIZE));
+
+        assert_eq!(a.len(), SIZE);
+        assert_eq!(b.len(), SIZE);
+        assert_ne!(a, b, "heartbeat filler must be random, not constant");
+        assert!(
+            a.iter().any(|&x| x != 0),
+            "heartbeat filler must not be all-zero"
+        );
     }
 
     #[test]

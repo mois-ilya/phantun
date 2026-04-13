@@ -288,6 +288,16 @@ RUST_LOG=info phantun_client --local 127.0.0.1:1234 --remote 10.0.0.1:4567 --ste
 
 Both client and server should use the same stealth level.
 
+## XOR obfuscation and heartbeat
+
+Phantun supports an optional `--key <KEY>` flag on both client and server. When set, payloads are wrapped in a short XOR envelope (`[IV 8][marker 1][body]`, 9-byte fixed overhead). Both ends must use the same key.
+
+With a key, each connection also runs a heartbeat task that sends 1200 bytes of random filler every 600ms in each direction. This mimics udp2raw's two-bucket packet-size pattern (small data packets + large heartbeats) to reduce DPI fingerprinting. Heartbeats are silently discarded on receive.
+
+Without `--key`, payload passes through unchanged and no heartbeat task is spawned.
+
+**Note:** the envelope format changed in the `mimic-clean` branch (no random padding, fixed 9-byte overhead). Old and new phantun builds are wire-incompatible; upgrade both ends together.
+
 ## Performance impact
 
 | Level | Per-packet overhead | Extra packets | Estimated throughput impact |

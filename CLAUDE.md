@@ -20,7 +20,9 @@ cargo clippy --verbose          # lint (CI runs this)
 
 ## XOR Envelope & Heartbeat
 
-When `--xor-key` is set, payloads are wrapped as `[IV 8][marker 1][body]` (9-byte overhead, marker `'b'`=data, `'h'`=heartbeat). Client and server each spawn a per-connection heartbeat task that sends 1200 random bytes every 600ms (mimics udp2raw's two-bucket size pattern to avoid ТСПУ fingerprinting). Heartbeats are silently discarded on receive. No heartbeat task is spawned when `--xor-key` is absent.
+When `--key` is set, payloads are wrapped as `[IV 8][marker 1][body]` (9-byte overhead, marker `'b'`=data, `'h'`=heartbeat). Client and server each spawn a per-connection heartbeat task that sends 1200 random bytes every 600ms (mimics udp2raw's two-bucket size pattern to avoid ТСПУ fingerprinting). Heartbeats are silently discarded on receive. No heartbeat task is spawned when `--key` is absent.
+
+**Wire-compat break:** the envelope format (9-byte fixed overhead, no random padding) is incompatible with pre-`mimic-clean` phantun builds. Both ends must be upgraded together.
 
 ## Testing
 
