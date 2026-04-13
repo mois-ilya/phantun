@@ -53,7 +53,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{
-    atomic::{AtomicU16, AtomicU32, Ordering},
+    atomic::{AtomicU32, Ordering},
     Arc, RwLock,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -120,12 +120,9 @@ pub struct Socket {
     remote_addr: SocketAddr,
     seq: AtomicU32,
     ack: AtomicU32,
-    last_ack: AtomicU32,
     state: State,
     /// Last received peer tsval, echoed back as ts_ecr
     ts_ecr: AtomicU32,
-    /// Last window value we sent, reused for duplicate ACKs
-    last_window_sent: AtomicU16,
 }
 
 /// A socket that represents a unique TCP connection between a server and client.
@@ -157,10 +154,8 @@ impl Socket {
                 remote_addr,
                 seq: AtomicU32::new(initial_seq),
                 ack: AtomicU32::new(ack.unwrap_or(0)),
-                last_ack: AtomicU32::new(ack.unwrap_or(0)),
                 state,
                 ts_ecr: AtomicU32::new(0),
-                last_window_sent: AtomicU16::new(0),
             },
             incoming_tx,
         )
@@ -191,23 +186,6 @@ impl Socket {
 
     fn build_tcp_packet(&self, flags: u8, payload: Option<&[u8]>) -> Bytes {
         let ack = self.ack.load(Ordering::Relaxed);
-        let prev_ack = self.last_ack.load(Ordering::Relaxed);
-        self.last_ack.store(ack, Ordering::Relaxed);
-
-        // Per RFC 5681, duplicate ACKs must carry the same advertised window.
-        // If we re-rolled jitter on every pure ACK, the peer's dup-ACK detector
-        // would see window updates instead of true duplicates. Reuse the
-        // previous window when sending a pure ACK with an unchanged ack number.
-        // Exclude SYN/SYN+ACK: handshake packets must always advertise a real
-        // window (last_window_sent starts at 0 and hasn't been set yet).
-        let is_syn = (flags & tcp::TcpFlags::SYN) != 0;
-        let window = if !is_syn && payload.is_none() && ack == prev_ack {
-            self.last_window_sent.load(Ordering::Relaxed)
-        } else {
-            let w = self.current_window();
-            self.last_window_sent.store(w, Ordering::Relaxed);
-            w
-        };
 
         build_tcp_packet(
             self.local_addr,
@@ -218,7 +196,7 @@ impl Socket {
             payload,
             self.current_ts_val(),
             self.ts_ecr.load(Ordering::Relaxed),
-            window,
+            self.current_window(),
         )
     }
 
@@ -232,7 +210,7 @@ impl Socket {
     pub async fn send(&self, payload: &[u8]) -> Option<()> {
         match self.state {
             State::Established => {
-                let flags = tcp::TcpFlags::PSH | tcp::TcpFlags::ACK;
+                let flags = tcp::TcpFlags::ACK;
 
                 let buf = self.build_tcp_packet(flags, Some(payload));
                 self.seq.fetch_add(payload.len() as u32, Ordering::Relaxed);
@@ -268,24 +246,13 @@ impl Socket {
 
                     let payload = tcp_packet.payload();
 
-                    // Skip ACK-only packets (no payload) — update ack state but don't deliver to app
+                    // Skip ACK-only packets (no payload) — don't deliver to app
                     if payload.is_empty() {
                         continue;
                     }
 
                     let new_ack = tcp_packet.get_sequence().wrapping_add(payload.len() as u32);
-                    let last_ask = self.last_ack.load(Ordering::Relaxed);
                     self.ack.store(new_ack, Ordering::Relaxed);
-
-                    // Send standalone ACK on every received data packet
-                    let send_ack = new_ack != last_ask;
-
-                    if send_ack {
-                        let ack_buf = self.build_tcp_packet(tcp::TcpFlags::ACK, None);
-                        if let Err(e) = self.tun.try_send(&ack_buf) {
-                            info!("Connection {} unable to send standalone ACK: {}", self, e)
-                        }
-                    }
 
                     buf[..payload.len()].copy_from_slice(payload);
                     return Some(payload.len());
@@ -758,30 +725,6 @@ mod tests {
         let values: Vec<u32> = (0..10).map(|_| rand::random::<u32>()).collect();
         let unique: std::collections::HashSet<u32> = values.into_iter().collect();
         assert!(unique.len() > 1, "ISN should vary between connections");
-    }
-
-    // --- ACK threshold tests ---
-
-    #[test]
-    fn test_ack_threshold_sends_on_every_packet() {
-        // ACK is sent on every received data packet when new_ack != last_ack
-        let new_ack: u32 = 100;
-        let last_ack: u32 = 0;
-        let should_ack = new_ack != last_ack;
-        assert!(should_ack, "any data should trigger standalone ACK");
-
-        let new_ack: u32 = 1;
-        let last_ack: u32 = 0;
-        let should_ack = new_ack != last_ack;
-        assert!(should_ack, "even 1 byte should trigger ACK");
-    }
-
-    #[test]
-    fn test_ack_no_standalone_when_unchanged() {
-        let new_ack: u32 = 100;
-        let last_ack: u32 = 100;
-        let should_ack = new_ack != last_ack;
-        assert!(!should_ack, "no ACK when ack unchanged");
     }
 
     // --- Dynamic window tests ---
