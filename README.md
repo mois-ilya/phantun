@@ -23,11 +23,8 @@ A lightweight and fast UDP to TCP obfuscator.
     * [4. Start Phantun daemon](#4-start-phantun-daemon)
         * [Server](#server)
         * [Client](#client)
-* [Stealth mode](#stealth-mode)
-    * [Stealth levels](#stealth-levels)
-    * [Usage](#usage-1)
-    * [Performance impact](#performance-impact)
-    * [MTU with stealth mode](#mtu-with-stealth-mode)
+* [DPI evasion (mimic udp2raw)](#dpi-evasion-mimic-udp2raw)
+    * [XOR obfuscation and heartbeat](#xor-obfuscation-and-heartbeat)
 * [MTU overhead](#mtu-overhead)
     * [MTU calculation for WireGuard](#mtu-calculation-for-wireguard)
 * [Version compatibility](#version-compatibility)
@@ -261,32 +258,16 @@ RUST_LOG=info /usr/local/bin/phantun_client --local 127.0.0.1:1234 --remote exam
 
 [Back to TOC](#table-of-contents)
 
-# Stealth mode
+# DPI evasion (mimic udp2raw)
 
-Phantun supports a `--stealth` flag that makes the fake TCP traffic harder to detect by stateful deep packet inspection (DPI) systems. This is useful in environments where basic TCP obfuscation is not enough (e.g., ТСПУ and similar systems that fingerprint TCP stack behavior).
+Phantun's fake TCP fingerprint is hardcoded to match [udp2raw](https://github.com/wangyu-/udp2raw-tunnel):
+Linux-like SYN options (MSS + SACK + timestamps + wscale=5), TCP timestamps on
+every data packet, TTL=65, no standalone ACKs, no PSH flag, and a udp2raw-compatible
+IP ID and ts_val layout. This makes the traffic harder to fingerprint by stateful
+DPI systems (e.g., ТСПУ) that look for deviations from real Linux TCP stacks.
 
-## Stealth levels
-
-| Level | Name | Description |
-|-------|------|-------------|
-| 0 | Off | Default. Current behavior, no changes to TCP fingerprint. |
-| 1 | Basic | Fixes hard signatures: random ISN, realistic SYN options (MSS, SACK, timestamps, wscale), timestamps on all packets, PSH flag on data. |
-| 2 | Standard | Adds stateful mimicry: dynamic window size, frequent ACK updates, correct ts_ecr echo. Includes all Level 1 features. |
-| 3 | Full | Adds advanced simulation: duplicate ACK tracking, send window constraint, congestion simulation (slow start + congestion avoidance). Includes all Level 1-2 features. |
-
-Each level includes all features from lower levels.
-
-## Usage
-
-```
-# Server with stealth level 2
-RUST_LOG=info phantun_server --local 4567 --remote 127.0.0.1:1234 --stealth 2
-
-# Client with stealth level 2
-RUST_LOG=info phantun_client --local 127.0.0.1:1234 --remote 10.0.0.1:4567 --stealth 2
-```
-
-Both client and server should use the same stealth level.
+There is no CLI knob for the fingerprint — both ends use this single fingerprint
+unconditionally. Per-packet overhead is 12 bytes (TCP header 32 bytes with timestamps).
 
 ## XOR obfuscation and heartbeat
 
@@ -300,21 +281,6 @@ Without `--key`, payload passes through unchanged and no heartbeat task is spawn
 
 **Key mismatch caveat:** the envelope uses only a 1-byte marker, so a mismatched key will still pass the marker check about 2/256 ≈ 0.78% of the time. When that happens, a data frame gets forwarded to the UDP backend with a corrupt payload (the receiving UDP application typically drops it); a heartbeat frame is silently discarded. This lightweight envelope matches udp2raw's design — use matching keys on both ends and rely on your UDP payload's own integrity checks (e.g., WireGuard's AEAD).
 
-## Performance impact
-
-| Level | Per-packet overhead | Extra packets | Estimated throughput impact |
-|-------|-------------------|---------------|---------------------------|
-| 0 | None (20-byte TCP header) | None | Baseline |
-| 1 | +12 bytes (timestamps, 32-byte TCP header) | None | ~1% |
-| 2 | +12 bytes | Occasional standalone ACKs | ~2-3% |
-| 3 | +12 bytes | Occasional standalone ACKs | Variable (congestion window limits burst size) |
-
-Level 1-2 are recommended for most use cases. Level 3 provides the most realistic TCP behavior but may reduce throughput due to congestion window simulation.
-
-## MTU with stealth mode
-
-When stealth level >= 1, TCP timestamps add 12 bytes to data packets (TCP header grows from 20 to 32 bytes). Adjust your MTU calculations accordingly. See [MTU overhead](#mtu-overhead) for details.
-
 [Back to TOC](#table-of-contents)
 
 # MTU overhead
@@ -324,15 +290,13 @@ is the following (using IPv4 below as an example):
 
 **Standard UDP packet:** `20 byte IP header + 8 byte UDP header = 28 bytes`
 
-**Obfuscated packet (stealth 0):** `20 byte IP header + 20 byte TCP header = 40 bytes`
-
-**Obfuscated packet (stealth >= 1):** `20 byte IP header + 32 byte TCP header = 52 bytes`
+**Obfuscated packet:** `20 byte IP header + 32 byte TCP header = 52 bytes`
 
 Note that Phantun does not add any additional header other than IP and TCP headers in order to pass through
 stateful packet inspection!
 
-Phantun's additional overhead: `12 bytes` (stealth 0) or `24 bytes` (stealth >= 1). With stealth mode enabled,
-TCP timestamps add 12 extra bytes to the header.
+Phantun's additional overhead: `24 bytes` (TCP timestamps add 12 bytes on top of
+the 12-byte TCP-vs-UDP header delta).
 
 ![Packet header diagram](images/packet-headers.png)
 
@@ -343,12 +307,6 @@ TCP timestamps add 12 extra bytes to the header.
 For people who use Phantun to tunnel [WireGuard®](https://www.wireguard.com) UDP packets, here are some guidelines on figuring
 out the correct MTU to use for your WireGuard interface.
 
-**Stealth 0 (default):**
-```
-WireGuard MTU = Link MTU - IPv4 header (20 bytes) - TCP header (20 bytes) - WireGuard overhead (32 bytes)
-```
-
-**Stealth >= 1 (timestamps enabled):**
 ```
 WireGuard MTU = Link MTU - IPv4 header (20 bytes) - TCP header (32 bytes) - WireGuard overhead (32 bytes)
 ```
@@ -357,13 +315,9 @@ Replace IPv4 header (20 bytes) with IPv6 header (40 bytes) for IPv6 links.
 
 For example, for a network link with 1500 bytes MTU, the WireGuard interface MTU should be set as:
 
-**IPv4 (stealth 0):** `1500 - 20 - 20 - 32 = 1428 bytes`
+**IPv4:** `1500 - 20 - 32 - 32 = 1416 bytes`
 
-**IPv4 (stealth >= 1):** `1500 - 20 - 32 - 32 = 1416 bytes`
-
-**IPv6 (stealth 0):** `1500 - 40 - 20 - 32 = 1408 bytes`
-
-**IPv6 (stealth >= 1):** `1500 - 40 - 32 - 32 = 1396 bytes`
+**IPv6:** `1500 - 40 - 32 - 32 = 1396 bytes`
 
 The resulted Phantun TCP data packet will be 1500 bytes which does not exceed the
 interface MTU of 1500.
@@ -384,9 +338,9 @@ generally very hard to troubleshoot.
 While the TCP stack is fairly stable, the general expectation is that you should run same minor versions
 of Server/Client of Phantun on both ends to ensure maximum compatibility.
 
-When using stealth mode, both client and server must be configured with the same `--stealth` level.
-Mismatched stealth levels may cause connection failures due to differing TCP option layouts and window
-scale values.
+Both client and server must run matching builds from the `mimic-clean` branch — the
+TCP fingerprint and XOR envelope format are wire-incompatible with pre-`mimic-clean`
+phantun releases.
 
 [Back to TOC](#table-of-contents)
 
@@ -427,7 +381,7 @@ Writeup on some of the techniques used in Phantun to achieve this performance re
 cargo test -p fake-tcp
 ```
 
-Runs unit tests covering packet construction, parsing, checksums, round-trips, and stealth mode behavior for all levels (0-3).
+Runs unit tests covering packet construction, parsing, checksums, round-trips, and the udp2raw-mimic TCP fingerprint.
 
 ## Integration tests (Linux + Docker, requires `--privileged`)
 
@@ -473,7 +427,7 @@ Here is a quick overview of comparison between those two to help you choose:
 | Tunneling MTU overhead                           | 12-24 bytes   |      44 bytes     |
 | Seprate TCP connections for each UDP connection  | Client/Server |    Server only    |
 | Anti-replay, encryption                          |       ❌       |         ✅         |
-| DPI evasion (stealth mode)                       |       ✅       |         ✅         |
+| DPI evasion (TCP fingerprint mimic)              |       ✅       |         ✅         |
 | IPv6                                             |       ✅       |          ✅        |
 
 [Back to TOC](#table-of-contents)

@@ -221,11 +221,23 @@ pub fn parse_ip_packet(buf: &Bytes) -> Option<(IPPacket<'_>, tcp::TcpPacket<'_>)
     let version = (*buf.first()?) >> 4;
     if version == 4 {
         let v4 = ipv4::Ipv4Packet::new(buf)?;
+        if v4.get_header_length() < 5 {
+            return None;
+        }
         if v4.get_next_level_protocol() != ip::IpNextHeaderProtocols::Tcp {
             return None;
         }
 
-        let tcp = tcp::TcpPacket::new(buf.get(IPV4_HEADER_LEN..)?)?;
+        let tcp_offset = (v4.get_header_length() as usize) * 4;
+        let total_length = v4.get_total_length() as usize;
+        // Reject packets where the declared IP total_length is too short to
+        // contain even the IP header + minimum TCP header, or exceeds the
+        // buffer. Slice within total_length so trailing bytes beyond the IP
+        // datagram are not fed to the TCP parser.
+        if total_length < tcp_offset + TCP_HEADER_LEN || total_length > buf.len() {
+            return None;
+        }
+        let tcp = tcp::TcpPacket::new(buf.get(tcp_offset..total_length)?)?;
         Some((IPPacket::V4(v4), tcp))
     } else if version == 6 {
         let v6 = ipv6::Ipv6Packet::new(buf)?;
@@ -233,7 +245,14 @@ pub fn parse_ip_packet(buf: &Bytes) -> Option<(IPPacket<'_>, tcp::TcpPacket<'_>)
             return None;
         }
 
-        let tcp = tcp::TcpPacket::new(buf.get(IPV6_HEADER_LEN..)?)?;
+        let payload_len = v6.get_payload_length() as usize;
+        // Reject packets where payload_length is too short for a TCP header
+        // or extends beyond the buffer. Slice within payload_length so
+        // trailing bytes beyond the IPv6 datagram are not fed to the TCP parser.
+        if payload_len < TCP_HEADER_LEN || IPV6_HEADER_LEN + payload_len > buf.len() {
+            return None;
+        }
+        let tcp = tcp::TcpPacket::new(buf.get(IPV6_HEADER_LEN..IPV6_HEADER_LEN + payload_len)?)?;
         Some((IPPacket::V6(v6), tcp))
     } else {
         None

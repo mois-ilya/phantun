@@ -10,13 +10,13 @@ cargo build --release           # release build
 cargo clippy --verbose          # lint (CI runs this)
 ```
 
-## Stealth Mode
+## Mimic Mode (udp2raw fingerprint)
 
-`--stealth <0-3>` on client/server controls TCP fingerprint realism:
-- `0` — default, original behavior (byte-identical to pre-stealth code)
-- `1` — random ISN, Linux-like SYN options (MSS+SACK+TS+wscale), timestamps on all packets, PSH on data
-- `2` — dynamic window, frequent ACK, correct ts_ecr echo
-- `3` — dup ACK tracking, send window constraint, congestion simulation (may throttle throughput)
+The `mimic-clean` branch hardcodes the TCP fingerprint to match udp2raw: Linux-like
+SYN options (MSS+SACK+TS+wscale), TCP timestamps on all packets, TTL=65, no
+standalone ACKs, no PSH flag, udp2raw-compatible IP ID and ts_val. The `--stealth`
+CLI flag and `StealthLevel`/`MimicProfile` abstractions have been removed — there
+is a single hardcoded behavior. See plans/mimic-udp2raw.md for the full rationale.
 
 ## XOR Envelope & Heartbeat
 
@@ -70,8 +70,8 @@ git config core.hooksPath .githooks
 
 ## Gotchas
 
-- `--stealth 0` must remain byte-identical to pre-stealth output (backward compatibility invariant)
-- Level 3 congestion simulation intentionally throttles throughput for realism
+- The mimic fingerprint (udp2raw-compatible) is hardcoded — the pre-stealth "byte-identical" invariant is obsolete on this branch
+- `parse_ip_packet` in `packet.rs` honors IHL/total_length and returns `None` on malformed buffers
 - `parse_ip_packet` in `packet.rs` panics on malformed/short buffers — known issue, see `#[should_panic]` tests
 - Binaries require `CAP_NET_ADMIN` or root for TUN device creation
 - Cross-compilation uses `cross` tool; MIPS targets require nightly toolchain
