@@ -185,12 +185,16 @@ impl Socket {
     }
 
     fn build_tcp_packet(&self, flags: u8, payload: Option<&[u8]>) -> Bytes {
+        self.build_tcp_packet_with_seq(self.seq.load(Ordering::Relaxed), flags, payload)
+    }
+
+    fn build_tcp_packet_with_seq(&self, seq: u32, flags: u8, payload: Option<&[u8]>) -> Bytes {
         let ack = self.ack.load(Ordering::Relaxed);
 
         build_tcp_packet(
             self.local_addr,
             self.remote_addr,
-            self.seq.load(Ordering::Relaxed),
+            seq,
             ack,
             flags,
             payload,
@@ -212,8 +216,13 @@ impl Socket {
             State::Established => {
                 let flags = tcp::TcpFlags::ACK;
 
-                let buf = self.build_tcp_packet(flags, Some(payload));
-                self.seq.fetch_add(payload.len() as u32, Ordering::Relaxed);
+                // Atomically reserve the seq range before building the packet so
+                // concurrent send() callers (e.g., data worker + heartbeat task)
+                // each claim a non-overlapping TCP sequence range.
+                let seq = self
+                    .seq
+                    .fetch_add(payload.len() as u32, Ordering::Relaxed);
+                let buf = self.build_tcp_packet_with_seq(seq, flags, Some(payload));
                 self.tun.send(&buf).await.ok().and(Some(()))
             }
             _ => unreachable!(),
@@ -254,8 +263,16 @@ impl Socket {
                     let new_ack = tcp_packet.get_sequence().wrapping_add(payload.len() as u32);
                     self.ack.store(new_ack, Ordering::Relaxed);
 
-                    buf[..payload.len()].copy_from_slice(payload);
-                    return Some(payload.len());
+                    let copy_len = payload.len().min(buf.len());
+                    if payload.len() > buf.len() {
+                        warn!(
+                            "recv: payload ({} bytes) truncated to buffer size ({} bytes)",
+                            payload.len(),
+                            buf.len()
+                        );
+                    }
+                    buf[..copy_len].copy_from_slice(&payload[..copy_len]);
+                    return Some(copy_len);
                 }
             }
             _ => unreachable!(),
@@ -272,7 +289,10 @@ impl Socket {
                 State::Idle => {
                     let buf = self.build_tcp_packet(tcp::TcpFlags::SYN | tcp::TcpFlags::ACK, None);
                     // ACK set by constructor
-                    self.tun.send(&buf).await.unwrap();
+                    if let Err(e) = self.tun.send(&buf).await {
+                        warn!("accept: failed to send SYN+ACK to TUN: {}, retrying", e);
+                        continue;
+                    }
                     self.state = State::SynReceived;
                     info!("Sent SYN + ACK to client");
                 }
@@ -335,7 +355,10 @@ impl Socket {
             match self.state {
                 State::Idle => {
                     let buf = self.build_tcp_packet(tcp::TcpFlags::SYN, None);
-                    self.tun.send(&buf).await.unwrap();
+                    if let Err(e) = self.tun.send(&buf).await {
+                        warn!("connect: failed to send SYN to TUN: {}, retrying", e);
+                        continue;
+                    }
                     self.state = State::SynSent;
                     info!("Sent SYN to server");
                 }
@@ -365,7 +388,14 @@ impl Socket {
 
                                 // send ACK to finish handshake
                                 let buf = self.build_tcp_packet(tcp::TcpFlags::ACK, None);
-                                self.tun.send(&buf).await.unwrap();
+                                if let Err(e) = self.tun.send(&buf).await {
+                                    warn!("connect: failed to send handshake ACK to TUN: {}, retrying", e);
+                                    // Roll back seq so the retransmitted SYN+ACK passes
+                                    // the ack == seq + 1 check on the next iteration.
+                                    // ack/state updates are idempotent (absolute stores).
+                                    self.seq.fetch_sub(1, Ordering::Relaxed);
+                                    continue;
+                                }
 
                                 self.state = State::Established;
 
@@ -673,7 +703,9 @@ impl Stack {
                                     0, 0,
                                     rst_window,
                                 );
-                                shared.tun[0].try_send(&buf).unwrap();
+                                if let Err(e) = shared.tun[0].try_send(&buf) {
+                                    trace!("reader: failed to send RST to TUN: {}", e);
+                                }
                             }
                         }
                         None => {

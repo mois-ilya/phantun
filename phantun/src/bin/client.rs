@@ -213,7 +213,13 @@ async fn main() -> io::Result<()> {
 
             let sock = Arc::new(sock.unwrap());
             if let Some(ref p) = handshake_packet {
-                if sock.send(p).await.is_none() {
+                // When --key is set the peer classifies every inbound TCP payload
+                // through the XOR envelope, so a plaintext handshake packet would
+                // be dropped as DecodeFailed. Pass the handshake through the same
+                // encoder: the disguise value is lost (peer already expects XOR)
+                // but the feature remains functional.
+                let encoded = encode_payload(&key, p);
+                if sock.send(encoded.as_ref()).await.is_none() {
                     error!("Failed to send handshake packet to remote, closing connection.");
                     continue;
                 }
