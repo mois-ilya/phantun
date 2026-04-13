@@ -19,7 +19,11 @@
 
 use rand::{RngCore, random};
 
-const OVERHEAD: usize = 9; // 8 IV + 1 marker
+/// Fixed envelope overhead: 8-byte IV + 1-byte marker.
+///
+/// Exposed so binaries can size receive buffers correctly without duplicating
+/// the constant (previously there were three separate copies that could drift).
+pub const OVERHEAD: usize = 9; // 8 IV + 1 marker
 const MARKER_DATA: u8 = b'b';
 const MARKER_HEARTBEAT: u8 = b'h';
 
@@ -229,5 +233,26 @@ mod tests {
     fn test_overhead_is_nine_bytes() {
         let encoded = encode(KEY, b"");
         assert_eq!(encoded.len(), 9);
+        assert_eq!(OVERHEAD, 9);
+    }
+
+    #[test]
+    fn test_decode_exact_nine_byte_data_envelope() {
+        // A valid Data envelope with empty payload: exactly OVERHEAD (9) bytes.
+        // Must decode to Data(empty) — boundary the review flagged.
+        let encoded = encode(KEY, b"");
+        assert_eq!(encoded.len(), OVERHEAD);
+        let decoded = decode(KEY, &encoded).expect("decode succeeds");
+        assert_eq!(decoded, DecodedMessage::Data(Vec::new()));
+    }
+
+    #[test]
+    fn test_encode_decode_large_payload() {
+        // Round-trip at realistic WireGuard-over-phantun sizes (>= 1200 bytes).
+        let payload: Vec<u8> = (0..1400).map(|i| (i * 17 + 3) as u8).collect();
+        let encoded = encode(KEY, &payload);
+        assert_eq!(encoded.len(), payload.len() + OVERHEAD);
+        let decoded = decode(KEY, &encoded).expect("decode succeeds");
+        assert_eq!(decoded, DecodedMessage::Data(payload));
     }
 }

@@ -4,6 +4,7 @@ use fake_tcp::{Socket, Stack};
 use log::{debug, error, info, trace};
 use phantun::utils::{assign_ipv6_address, new_udp_reuseport, udp_recv_pktinfo};
 use phantun::xor;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -17,36 +18,37 @@ use tokio_util::sync::CancellationToken;
 
 use phantun::UDP_TTL;
 
-const ENCODE_OVERHEAD: usize = 9; // 8 IV + 1 marker
 const HEARTBEAT_SIZE: usize = 1200;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(600);
 
-fn encode_payload(key: &Option<Arc<Vec<u8>>>, payload: &[u8]) -> Vec<u8> {
+/// Encode outgoing payload. Returns a borrowed slice when no key is set
+/// (zero-alloc hot path) and an owned encoded buffer otherwise.
+fn encode_payload<'a>(key: &Option<Arc<Vec<u8>>>, payload: &'a [u8]) -> Cow<'a, [u8]> {
     match key {
-        Some(k) => xor::encode(k, payload),
-        None => payload.to_vec(),
+        Some(k) => Cow::Owned(xor::encode(k, payload)),
+        None => Cow::Borrowed(payload),
     }
 }
 
 /// Classification of an incoming TCP payload, for the recv hot path.
-enum Incoming {
-    /// Decoded data to forward on to UDP.
-    Data(Vec<u8>),
+enum Incoming<'a> {
+    /// Decoded data to forward on to UDP (borrowed when no key, owned when decoded).
+    Data(Cow<'a, [u8]>),
     /// Valid heartbeat — discard silently.
     Heartbeat,
     /// Decode failed (bad marker / too short / wrong key).
     DecodeFailed,
 }
 
-/// Classify an incoming payload. With no key, always `Incoming::Data`.
-fn classify_incoming(key: &Option<Arc<Vec<u8>>>, data: &[u8]) -> Incoming {
+/// Classify an incoming payload. With no key, always `Incoming::Data` (zero-alloc).
+fn classify_incoming<'a>(key: &Option<Arc<Vec<u8>>>, data: &'a [u8]) -> Incoming<'a> {
     match key {
         Some(k) => match xor::decode(k, data) {
-            Some(xor::DecodedMessage::Data(v)) => Incoming::Data(v),
+            Some(xor::DecodedMessage::Data(v)) => Incoming::Data(Cow::Owned(v)),
             Some(xor::DecodedMessage::Heartbeat) => Incoming::Heartbeat,
             None => Incoming::DecodeFailed,
         },
-        None => Incoming::Data(data.to_vec()),
+        None => Incoming::Data(Cow::Borrowed(data)),
     }
 }
 
@@ -190,9 +192,14 @@ async fn main() -> io::Result<()> {
         .map(fs::read)
         .transpose()?;
 
-    let key: Option<Arc<Vec<u8>>> = matches
-        .get_one::<String>("key")
-        .map(|k| Arc::new(k.as_bytes().to_vec()));
+    let key: Option<Arc<Vec<u8>>> = match matches.get_one::<String>("key") {
+        Some(k) if k.is_empty() => {
+            eprintln!("--key must not be empty");
+            std::process::exit(2);
+        }
+        Some(k) => Some(Arc::new(k.as_bytes().to_vec())),
+        None => None,
+    };
 
     let num_cpus = num_cpus::get();
     info!("{} cores available", num_cpus);
@@ -228,7 +235,7 @@ async fn main() -> io::Result<()> {
             //    connected UDP socket yet
             if let Some(sock) = connections.read().await.get(&udp_remote_addr) {
                 let payload = encode_payload(&key, &buf_r[..size]);
-                sock.send(&payload).await;
+                sock.send(payload.as_ref()).await;
                 continue;
             }
 
@@ -251,7 +258,7 @@ async fn main() -> io::Result<()> {
 
             // send first packet
             let first_payload = encode_payload(&key, &buf_r[..size]);
-            if sock.send(&first_payload).await.is_none() {
+            if sock.send(first_payload.as_ref()).await.is_none() {
                 continue;
             }
 
@@ -276,8 +283,8 @@ async fn main() -> io::Result<()> {
                 let key = key.clone();
                 tokio::spawn(async move {
                     let mut buf_udp = [0u8; MAX_PACKET_LEN];
-                    // buf_tcp must fit an encoded packet: payload (up to MAX_PACKET_LEN) + ENCODE_OVERHEAD
-                    let mut buf_tcp = [0u8; MAX_PACKET_LEN + ENCODE_OVERHEAD];
+                    // buf_tcp must fit an encoded packet: payload (up to MAX_PACKET_LEN) + xor::OVERHEAD
+                    let mut buf_tcp = [0u8; MAX_PACKET_LEN + xor::OVERHEAD];
                     // Always reply from the same address that the peer used to communicate with
                     // us. This avoids a frequent problem with IPv6 privacy extensions when we
                     // erroneously bind to wrong short-lived temporary address even if the peer
@@ -311,7 +318,7 @@ async fn main() -> io::Result<()> {
                         tokio::select! {
                             Ok(size) = udp_sock.recv(&mut buf_udp) => {
                                 let payload = encode_payload(&key, &buf_udp[..size]);
-                                if sock.send(&payload).await.is_none() {
+                                if sock.send(payload.as_ref()).await.is_none() {
                                     debug!("removed fake TCP socket from connections table");
                                     quit.cancel();
                                     return;
@@ -325,11 +332,16 @@ async fn main() -> io::Result<()> {
                                         if size > 0 {
                                             match classify_incoming(&key, &buf_tcp[..size]) {
                                                 Incoming::Data(decoded) => {
-                                                    if let Err(e) = udp_sock.send(&decoded).await {
+                                                    if let Err(e) = udp_sock.send(decoded.as_ref()).await {
                                                         error!("Unable to send UDP packet to {}: {}, closing connection", e, remote_addr);
                                                         quit.cancel();
                                                         return;
                                                     }
+                                                    // Only real data resets the UDP_TTL idle timer.
+                                                    // Heartbeats keep the TCP half-open but must not
+                                                    // mask a disappeared UDP peer (would leak the
+                                                    // connections map entry forever).
+                                                    packet_received.notify_one();
                                                 }
                                                 Incoming::Heartbeat => {}
                                                 Incoming::DecodeFailed => {
@@ -344,8 +356,6 @@ async fn main() -> io::Result<()> {
                                         return;
                                     },
                                 }
-
-                                packet_received.notify_one();
                             },
                             _ = quit.cancelled() => {
                                 debug!("worker {} terminated", i);

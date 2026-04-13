@@ -298,6 +298,8 @@ Without `--key`, payload passes through unchanged and no heartbeat task is spawn
 
 **Note:** the envelope format changed in the `mimic-clean` branch (no random padding, fixed 9-byte overhead). Old and new phantun builds are wire-incompatible; upgrade both ends together.
 
+**Key mismatch caveat:** the envelope uses only a 1-byte marker, so a mismatched key will still pass the marker check about 2/256 ≈ 0.78% of the time. When that happens, a data frame gets forwarded to the UDP backend with a corrupt payload (the receiving UDP application typically drops it); a heartbeat frame is silently discarded. This lightweight envelope matches udp2raw's design — use matching keys on both ends and rely on your UDP payload's own integrity checks (e.g., WireGuard's AEAD).
+
 ## Performance impact
 
 | Level | Per-packet overhead | Extra packets | Estimated throughput impact |
