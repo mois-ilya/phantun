@@ -48,7 +48,7 @@ impl IPPacket<'_> {
 /// Build a TCP/IP packet with the udp2raw fingerprint hardcoded:
 /// - SYN options: MSS(1460) + SACK_PERM + Timestamps + NOP + WScale(5) = 20 bytes
 /// - Non-SYN options: NOP + NOP + Timestamps = 12 bytes
-/// - DF flag always set, TTL=64
+/// - DF flag always set, TTL=65 (kernel decrements by 1 during TUN→NIC forwarding, so wire sees 64)
 #[allow(clippy::too_many_arguments)]
 pub fn build_tcp_packet(
     local_addr: SocketAddr,
@@ -86,7 +86,7 @@ pub fn build_tcp_packet(
             v4.set_version(4);
             v4.set_header_length(IPV4_HEADER_LEN as u8 / 4);
             v4.set_next_level_protocol(ip::IpNextHeaderProtocols::Tcp);
-            v4.set_ttl(64);
+            v4.set_ttl(65); // +1 to compensate for kernel TTL decrement during TUN→NIC forwarding
             v4.set_source(*local.ip());
             v4.set_destination(*remote.ip());
             v4.set_total_length(total_len.try_into().unwrap());
@@ -101,7 +101,7 @@ pub fn build_tcp_packet(
             v6.set_version(6);
             v6.set_payload_length(tcp_total_len.try_into().unwrap());
             v6.set_next_header(ip::IpNextHeaderProtocols::Tcp);
-            v6.set_hop_limit(64);
+            v6.set_hop_limit(65); // +1 to compensate for kernel TTL decrement during TUN→NIC forwarding
             v6.set_source(*local.ip());
             v6.set_destination(*remote.ip());
         }
@@ -271,7 +271,7 @@ mod tests {
         let v4 = ipv4::Ipv4Packet::new(&pkt).unwrap();
         assert_eq!(v4.get_version(), 4);
         assert_eq!(v4.get_next_level_protocol(), ip::IpNextHeaderProtocols::Tcp);
-        assert_eq!(v4.get_ttl(), 64);
+        assert_eq!(v4.get_ttl(), 65);
         assert_eq!(v4.get_flags(), ipv4::Ipv4Flags::DontFragment);
         assert_eq!(v4.get_total_length() as usize, 60);
     }
@@ -364,7 +364,7 @@ mod tests {
         let v6 = ipv6::Ipv6Packet::new(&pkt).unwrap();
         assert_eq!(v6.get_version(), 6);
         assert_eq!(v6.get_next_header(), ip::IpNextHeaderProtocols::Tcp);
-        assert_eq!(v6.get_hop_limit(), 64);
+        assert_eq!(v6.get_hop_limit(), 65);
         assert_eq!(v6.get_payload_length() as usize, 40, "payload_length = TCP header with options");
     }
 
