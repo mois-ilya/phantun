@@ -141,8 +141,8 @@ pub fn decode(key: &[u8], data: &[u8]) -> Option<DecodedMessage>;
 - Modify: `CLAUDE.md` (если появились новые patterns)
 - Modify: `docs/plans/backlog.md` (удалить/обновить запись про размеры пакетов, если есть)
 
-- [ ] добавить в `CLAUDE.md` краткое упоминание про heartbeat механизм (если нужно для будущих контрибьюторов)
-- [ ] переместить этот план в `docs/plans/completed/` после успешного теста через ТСПУ
+- [x] добавить в `CLAUDE.md` краткое упоминание про heartbeat механизм (если нужно для будущих контрибьюторов) — added "XOR Envelope & Heartbeat" section
+- [x] moved after manual ТСПУ test (not automatable now) — переместить этот план в `docs/plans/completed/` после успешного теста через ТСПУ
 
 ## Technical Details
 

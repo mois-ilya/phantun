@@ -18,6 +18,10 @@ cargo clippy --verbose          # lint (CI runs this)
 - `2` — dynamic window, frequent ACK, correct ts_ecr echo
 - `3` — dup ACK tracking, send window constraint, congestion simulation (may throttle throughput)
 
+## XOR Envelope & Heartbeat
+
+When `--xor-key` is set, payloads are wrapped as `[IV 8][marker 1][body]` (9-byte overhead, marker `'b'`=data, `'h'`=heartbeat). Client and server each spawn a per-connection heartbeat task that sends 1200 random bytes every 600ms (mimics udp2raw's two-bucket size pattern to avoid ТСПУ fingerprinting). Heartbeats are silently discarded on receive. No heartbeat task is spawned when `--xor-key` is absent.
+
 ## Testing
 
 ```bash
