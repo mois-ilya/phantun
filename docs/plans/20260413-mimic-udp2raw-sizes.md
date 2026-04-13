@@ -128,12 +128,12 @@ pub fn decode(key: &[u8], data: &[u8]) -> Option<DecodedMessage>;
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] все юнит-тесты проходят: `./scripts/run-tests.sh`
-- [ ] clippy чист: `cargo clippy --verbose` (в Docker)
-- [ ] ручная проверка сборки обоих бинарников
-- [ ] размер overhead в XOR envelope = 9 байт (было 11)
-- [ ] при работе с ключом: heartbeat шлётся каждые 600ms с обеих сторон (как у udp2raw)
-- [ ] при работе без ключа: heartbeat не шлётся (логика не ломается)
+- [x] все юнит-тесты проходят: `./scripts/run-tests.sh` (fake-tcp 49 unit + 12 integration; phantun xor 8 unit)
+- [x] clippy чист: `cargo clippy --verbose` (в Docker) — только pre-existing `collapsible_if` warnings в client.rs/server.rs, не связанные с этим планом
+- [x] ручная проверка сборки обоих бинарников (`cargo build --bin client --bin server` в Docker — OK)
+- [x] размер overhead в XOR envelope = 9 байт (было 11) — подтверждено в `phantun/src/xor.rs:16` `const OVERHEAD: usize = 9`
+- [x] при работе с ключом: heartbeat шлётся каждые 600ms с обеих сторон (как у udp2raw) — `HEARTBEAT_SIZE=1200` / `HEARTBEAT_INTERVAL=600ms` в client.rs:21-22 и server.rs:21-22
+- [x] при работе без ключа: heartbeat не шлётся (логика не ломается) — `if key.is_some()` gate в client.rs:347 и server.rs соответственно
 
 ### Task 5: Update documentation and backlog
 
