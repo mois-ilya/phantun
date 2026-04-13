@@ -8,6 +8,7 @@ use std::fs;
 use std::io;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
 use tokio::time;
@@ -17,6 +18,8 @@ use tokio_util::sync::CancellationToken;
 use phantun::UDP_TTL;
 
 const ENCODE_OVERHEAD: usize = 9; // 8 IV + 1 marker
+const HEARTBEAT_SIZE: usize = 1200;
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(600);
 
 fn encode_payload(key: &Option<Vec<u8>>, payload: &[u8]) -> Vec<u8> {
     match key {
@@ -280,6 +283,35 @@ async fn main() -> io::Result<()> {
                 });
             }
 
+            // heartbeat task — only when XOR key is set (without key, receiver
+            // cannot distinguish heartbeat filler from real UDP payload)
+            if key.is_some() {
+                let sock_hb = sock.clone();
+                let quit_hb = quit.clone();
+                let key_hb = key.clone();
+                tokio::spawn(async move {
+                    let mut interval = time::interval(HEARTBEAT_INTERVAL);
+                    // skip the immediate first tick — no point beating right after connect
+                    interval.tick().await;
+                    loop {
+                        tokio::select! {
+                            _ = interval.tick() => {
+                                if let Some(ref k) = *key_hb {
+                                    let hb = xor::encode_heartbeat(k, HEARTBEAT_SIZE);
+                                    if sock_hb.send(&hb).await.is_none() {
+                                        quit_hb.cancel();
+                                        return;
+                                    }
+                                }
+                            },
+                            _ = quit_hb.cancelled() => {
+                                return;
+                            },
+                        }
+                    }
+                });
+            }
+
             tokio::spawn(async move {
                 loop {
                     let read_timeout = time::sleep(UDP_TTL);
@@ -290,6 +322,9 @@ async fn main() -> io::Result<()> {
                             info!("No traffic seen in the last {:?}, closing connection", UDP_TTL);
 
                             quit.cancel();
+                            return;
+                        },
+                        _ = quit.cancelled() => {
                             return;
                         },
                         _ = packet_received_fut => {},

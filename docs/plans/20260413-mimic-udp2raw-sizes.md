@@ -120,11 +120,11 @@ pub fn decode(key: &[u8], data: &[u8]) -> Option<DecodedMessage>;
 **Files:**
 - Modify: `phantun/src/bin/server.rs`
 
-- [ ] те же изменения констант: `ENCODE_OVERHEAD = 9`, убрать `MAX_PAD`
-- [ ] упростить `encode_payload` и обновить `decode_payload` (аналогично client)
-- [ ] filter heartbeat на recv-path (не слать в UDP бэкенд)
-- [ ] добавить heartbeat task в per-connection scope с теми же параметрами (1200 байт / 600ms)
-- [ ] verify compiles: `cargo build --bin phantun-server` (через Docker)
+- [x] те же изменения констант: `ENCODE_OVERHEAD = 9`, убрать `MAX_PAD`
+- [x] упростить `encode_payload` и обновить `decode_payload` (аналогично client)
+- [x] filter heartbeat на recv-path (не слать в UDP бэкенд)
+- [x] добавить heartbeat task в per-connection scope с теми же параметрами (1200 байт / 600ms)
+- [x] verify compiles: `cargo build --bin phantun-server` (через Docker — `./scripts/run-tests.sh` builds workspace)
 
 ### Task 4: Verify acceptance criteria
 
