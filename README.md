@@ -31,6 +31,7 @@ A lightweight and fast UDP to TCP obfuscator.
 * [Documentations](#documentations)
 * [Performance](#performance)
 * [Testing](#testing)
+* [Local compare harness](#local-compare-harness)
 * [Future plans](#future-plans)
 * [Compariation to udp2raw](#compariation-to-udp2raw)
 * [License](#license)
@@ -396,6 +397,42 @@ docker run --privileged phantun-test
 ```
 
 `--privileged` is required for network namespace creation. The integration tests are gated behind `--features integration-tests` and are automatically enabled in the Docker image.
+
+[Back to TOC](#table-of-contents)
+
+# Local compare harness
+
+The local compare harness is a Dockerised regression rig that captures the phantun
+fake-TCP packet stream (and a pinned udp2raw baseline) under identical,
+deterministic load so fingerprint changes after a code edit are visible without
+touching a real server. A constant-rate python UDP generator (625 pps × 200 B ×
+30 s) pushes traffic through the tunnel, `tcpdump` on the bridge side records it,
+and the post-processed text is dropped into `docs/runs/` for the HTML visualiser.
+See `docs/plans/20260416-local-compare-harness.md` for full rationale.
+
+Build and run:
+
+```bash
+scripts/capture-baseline.sh            # one-shot: creates docs/runs/baseline-udp2raw.txt (pinned, committed)
+scripts/capture-run.sh --notes "..."   # each time you change phantun code; writes docs/runs/phantun-<ts>-<sha>.txt (gitignored)
+scripts/serve-compare.sh               # open http://localhost:8000/packet-compare.html to browse runs
+```
+
+The baseline is one-shot by design — rerun only via `scripts/capture-baseline.sh --force`
+when the comparison setup itself changes (which invalidates earlier phantun runs too).
+The pinned udp2raw version is recorded in `docs/runs/manifest.json`; the file is
+the source of truth, so it isn't duplicated in prose here.
+
+Reference numbers from the first `--notes "det-1"` phantun run on this branch
+(for posterity / smoke-validation — exact counts will drift with code changes):
+37 440 packets captured, **max frozen ACK = 5**, max frozen TSecr = 5, max
+burst within a 20 ms window = 16, top-3 packet sizes (by count) = 275 B
+(37 327), 1275 B (98), 475 B (12). The udp2raw baseline on the same load is
+distinguishable: 37 222 packets, max frozen ACK = 7, max burst = 19, top-3
+sizes = 306 B (37 135), 1314 B (82), 514 B (5). The two back-to-back phantun
+runs (`det-1` vs `det-2`) differed by ≤ 1 on every metric — the harness is
+deterministic enough to detect edits, and distinct enough from udp2raw to see
+when phantun drifts toward or away from the reference fingerprint.
 
 [Back to TOC](#table-of-contents)
 

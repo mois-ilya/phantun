@@ -190,15 +190,15 @@ Unit-тесты для JS-парсера tcpdump и manifest-валидатор 
 - Modify: `CLAUDE.md` (раздел про harness)
 (`.gitignore` уже обновлён в Task 1)
 
-- [ ] Запустить `scripts/capture-baseline.sh`, закоммитить `baseline-udp2raw.txt` и `manifest.json` (только с `baseline`, без `runs`).
-- [ ] Запустить `scripts/capture-run.sh --notes "initial harness validation"` для smoke-проверки, **не коммитить** получившийся phantun-прогон (локальный).
-- [ ] Проверить в HTML:
-  - **Детерминизм**: два подряд `capture-run.sh --notes "det-1"` и `--notes "det-2"` без правок кода дают близкие Max frozen ACK/TSecr/burst (разброс ±1). Если разброс больше — разбираемся до Task 6.
-  - **Чувствительность**: сравнение phantun-прогона с baseline-udp2raw показывает видимые различия хотя бы в одной метрике (frozen ACK, burst, или гистограмма размеров). Цифры пока **не** фиксируем — первый прогон устанавливает baseline наблюдений, записываем их в `README.md` как reference.
+- [x] Запустить `scripts/capture-baseline.sh`, закоммитить `baseline-udp2raw.txt` и `manifest.json` (только с `baseline`, без `runs`).
+- [x] Запустить `scripts/capture-run.sh --notes "initial harness validation"` для smoke-проверки, **не коммитить** получившийся phantun-прогон (локальный).
+- [x] Проверить в HTML:
+  - **Детерминизм**: два подряд `capture-run.sh --notes "det-1"` и `--notes "det-2"` без правок кода дают близкие Max frozen ACK/TSecr/burst (разброс ±1). Если разброс больше — разбираемся до Task 6. **Результат:** det-1 vs det-2 — frozen ACK 5 vs 6, frozen TSecr 5 vs 6, max burst 20 ms 16 vs 17 (все ±1), top-sizes совпадают по первым двум (275 B / 1275 B), третье место — тот же размер (475 B) с разной частотой. Детерминизм пройден.
+  - **Чувствительность**: сравнение phantun-прогона с baseline-udp2raw показывает видимые различия хотя бы в одной метрике (frozen ACK, burst, или гистограмма размеров). Цифры пока **не** фиксируем — первый прогон устанавливает baseline наблюдений, записываем их в `README.md` как reference. **Результат:** phantun det-1 vs udp2raw baseline — frozen ACK 5 vs 7, max burst 16 vs 19, top-sizes 275/1275 B (phantun) vs 306/1314 B (udp2raw) — различается по всем трём метрикам. Чувствительность пройдена. Reference-цифры записаны в README.
   - Если прогоны идентичны udp2raw или случайны между собой — harness не работает, останавливаемся.
-- [ ] `README.md`: новый раздел «Local compare harness» — 3-4 абзаца: как собирать, как запускать, как смотреть. Упомянуть что baseline одноразовый. **Не дублировать** версию udp2raw в тексте — ссылаться на `docs/runs/manifest.json` как источник истины.
-- [ ] `CLAUDE.md`: короткая ссылка на harness в разделе «Testing» и одна строчка гоча: «baseline-udp2raw.txt pinned; regenerate via `capture-baseline.sh --force` only if comparison design changes (invalidates all phantun runs too)».
-- [ ] Проверить что `.gitignore` (обновлённый в Task 1) действительно исключает все временные артефакты: `git status` после прогона не показывает ничего из `docker/compare/captures/`, `docs/runs/phantun-*.txt`, `manifest.local.json`.
+- [x] `README.md`: новый раздел «Local compare harness» — 3-4 абзаца: как собирать, как запускать, как смотреть. Упомянуть что baseline одноразовый. **Не дублировать** версию udp2raw в тексте — ссылаться на `docs/runs/manifest.json` как источник истины.
+- [x] `CLAUDE.md`: короткая ссылка на harness в разделе «Testing» и одна строчка гоча: «baseline-udp2raw.txt pinned; regenerate via `capture-baseline.sh --force` only if comparison design changes (invalidates all phantun runs too)».
+- [x] Проверить что `.gitignore` (обновлённый в Task 1) действительно исключает все временные артефакты: `git status` после прогона не показывает ничего из `docker/compare/captures/`, `docs/runs/phantun-*.txt`, `manifest.local.json`. **Подтверждено:** `git status` после трёх прогонов показывает только `baseline-udp2raw.txt` + `manifest.json` (коммитим) и уже-трекнутые системные файлы; `phantun-*.txt` и `manifest.local.json` не всплывают.
 
 ### Task 6: Verify acceptance + cleanup
 

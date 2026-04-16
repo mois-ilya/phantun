@@ -32,6 +32,17 @@ When `--key` is set, payloads are wrapped as `[IV 8][marker 1][body]` (9-byte ov
 cargo clippy -p fake-tcp --verbose  # lint
 ```
 
+### Local compare harness (fingerprint regression)
+
+Dockerised rig that captures phantun and a pinned udp2raw baseline under identical deterministic load, and visualises both in `docs/packet-compare.html`. Use after every mimic-mode code change to spot fingerprint drift before deploying.
+
+```bash
+scripts/capture-run.sh --notes "..."   # new phantun run (gitignored)
+scripts/serve-compare.sh               # view http://localhost:8000/packet-compare.html
+```
+
+See `docs/plans/20260416-local-compare-harness.md` and the README "Local compare harness" section.
+
 ## Git Hooks
 
 ```bash
@@ -78,3 +89,4 @@ git config core.hooksPath .githooks
 - Integration test helpers live in `fake-tcp/src/testing.rs` (not `tests/common/mod.rs`, which is a thin re-export)
 - **macOS**: `cargo build/test/clippy` all fail locally — `tokio-tun` is Linux-only. Always use `./scripts/run-tests.sh` (Docker) to build and verify changes.
 - Integration tests and throughput benchmarks require Linux (`--privileged` Docker for network namespaces + iptables)
+- `docs/runs/baseline-udp2raw.txt` is pinned; regenerate via `capture-baseline.sh --force` only if the comparison design changes (invalidates all phantun runs too)
