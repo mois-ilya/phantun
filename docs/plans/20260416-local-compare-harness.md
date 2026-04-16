@@ -145,25 +145,25 @@ Unit-тесты для JS-парсера tcpdump и manifest-валидатор 
 - Create: `scripts/capture-baseline.sh`
 - Create: `scripts/serve-compare.sh`
 
-- [ ] `capture-run.sh [--notes "..."]`:
+- [x] `capture-run.sh [--notes "..."]`:
   - `trap 'docker compose -f ... down -v' EXIT INT TERM` в начале — cleanup при Ctrl+C.
   - `docker compose -f docker/compare/docker-compose.phantun.yml up --build --abort-on-container-exit --exit-code-from generator || true` (не падаем на non-zero exit от generator).
   - Копировать `captures/phantun.txt` → `docs/runs/phantun-<ts>-<sha>.txt`. Timestamp с секундами + короткий git-SHA. Если файл уже есть — суффикс `-2`, `-3`, ... до свободного имени.
-  - Sanity check: файл не пуст и содержит хотя бы одну tcpdump-строку (`grep -q 'IP '`).
+  - Sanity check: файл не пуст и содержит хотя бы одну tcpdump-строку (`grep -q 'IPv4'` — наш capturer запускает `tcpdump -e -v`, потому `IP ` префикс не появляется; ищем `IPv4` из `ethertype IPv4 (0x0800)`).
   - Обновить `docs/runs/manifest.local.json` inline через `python3 -c`:
     ```bash
     python3 -c "import json, os; p='docs/runs/manifest.local.json'; m=json.load(open(p)) if os.path.exists(p) else {'runs':[]}; m['runs'].append({...}); json.dump(m, open(p,'w'), indent=2)"
     ```
     Pretty-print через `indent=2`. Без flock — параллельный запуск скрипта на одной машине редок; docker compose сам сериализует по project name.
   - Очистить `captures/*` после копирования.
-- [ ] `capture-baseline.sh [--force]`:
+- [x] `capture-baseline.sh [--force]`:
   - Тот же trap/cleanup.
   - Через `docker-compose.udp2raw.yml` → `docs/runs/baseline-udp2raw.txt`.
   - Обновляет `manifest.json` (не `.local.json`) в поле `baseline` аналогичным inline-python.
   - Если baseline уже существует: prompt `"baseline будет перезаписан, продолжить? (y/N)"`. В non-TTY (`[ ! -t 0 ]`) — выход с ошибкой, если не `--force`.
-- [ ] `serve-compare.sh`: `cd docs && exec python3 -m http.server 8000`, печатает `open http://localhost:8000/packet-compare.html`.
-- [ ] Все скрипты: `set -euo pipefail`, `chmod +x`, проверка зависимостей (`command -v docker`, `command -v python3`) в начале.
-- [ ] Smoke: `scripts/capture-run.sh --notes "smoke"` → файл создан, `manifest.local.json` валиден (`python3 -m json.tool < docs/runs/manifest.local.json`).
+- [x] `serve-compare.sh`: `cd docs && exec python3 -m http.server 8000`, печатает `open http://localhost:8000/packet-compare.html`.
+- [x] Все скрипты: `set -euo pipefail`, `chmod +x`, проверка зависимостей (`command -v docker`, `command -v python3`) в начале.
+- [x] Smoke: `scripts/capture-run.sh --notes "smoke"` → файл создан, `manifest.local.json` валиден (`python3 -m json.tool < docs/runs/manifest.local.json`).
 
 ### Task 4: Рефактор packet-compare.html на fetch-based загрузку
 
