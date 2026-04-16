@@ -65,18 +65,22 @@ services:
       udp2raw-server:
         condition: service_started
     cap_add: [NET_ADMIN, NET_RAW]
+    # udp2raw-client is eager: it initiates the fake-TCP handshake the moment
+    # the binary starts. phantun-client is lazy (waits for first UDP packet),
+    # so phantun's SYN/SYN-ACK naturally fall inside the capture window. To
+    # keep the comparison symmetric we hold the binary back a bit, giving the
+    # capturer sidecar time to attach to this container's netns and open its
+    # tcpdump socket before the handshake fires.
     command:
-      - udp2raw
+      - sh
       - -c
-      - -l
-      - "0.0.0.0:${PHANTUN_LOCAL_UDP:-4500}"
-      - -r
-      - "100.64.240.20:${PHANTUN_TCP_PORT:-4567}"
-      - -k
-      - "${PHANTUN_KEY:-compare-harness-local}"
-      - --raw-mode
-      - faketcp
-      - -a
+      - |
+        sleep 2
+        exec udp2raw -c \
+          -l "0.0.0.0:${PHANTUN_LOCAL_UDP:-4500}" \
+          -r "100.64.240.20:${PHANTUN_TCP_PORT:-4567}" \
+          -k "${PHANTUN_KEY:-compare-harness-local}" \
+          --raw-mode faketcp -a
     networks:
       udp2raw-compare:
         ipv4_address: 100.64.240.30

@@ -69,18 +69,30 @@ if [ -e "$BASELINE_FILE" ] && [ "$FORCE" -ne 1 ]; then
     esac
 fi
 
+# Drop any leftovers from a prior run: if the capturer container fails to
+# start (image build broken, port collision, Docker daemon hiccup) the old
+# files would otherwise survive on the host and be copied as "fresh" data.
+rm -f "$CAPTURES_DIR"/udp2raw.pcap "$CAPTURES_DIR"/udp2raw.txt
+
 cleanup() {
     docker compose -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
 echo "==> starting udp2raw baseline stack"
+# --exit-code-from generator lets compose finish with the generator's exit
+# status. We check the capture file separately; if it's missing we surface
+# the compose exit code so the user can tell a broken stack from an empty
+# capture.
+set +e
 docker compose -f "$COMPOSE_FILE" up --build \
-    --abort-on-container-exit --exit-code-from generator || true
+    --abort-on-container-exit --exit-code-from generator
+COMPOSE_RC=$?
+set -e
 
 CAPTURE_SRC="$CAPTURES_DIR/udp2raw.txt"
 if [ ! -s "$CAPTURE_SRC" ]; then
-    echo "error: capture file $CAPTURE_SRC missing or empty" >&2
+    echo "error: capture file $CAPTURE_SRC missing or empty (docker compose exit code: $COMPOSE_RC)" >&2
     exit 1
 fi
 

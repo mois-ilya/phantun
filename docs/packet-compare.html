@@ -566,6 +566,9 @@ async function selectRun(file, runs){
     stats = computeStats(pkts);
   } catch (e) {
     console.error('run load failed', e);
+    // Clear the left column so the operator doesn't mistake stale visuals
+    // from a previously-selected run for fresh data under a failure title.
+    clearColumn('selected');
     document.getElementById('title-selected').textContent = `phantun — load failed (${file})`;
     return;
   }
@@ -582,6 +585,17 @@ function renderColumn(which, pkts, stats, other){
   renderHistogram(document.getElementById(`hist-${which}`), stats);
   renderSeqAck(document.getElementById(`seq-${which}`), pkts);
   renderTable(document.getElementById(`tbl-${which}`), pkts);
+}
+
+function clearColumn(which){
+  const statsEl = document.getElementById(`stats-${which}`);
+  if (statsEl) statsEl.innerHTML = '';
+  for (const prefix of ['tl', 'hist', 'seq']) {
+    const svg = document.getElementById(`${prefix}-${which}`);
+    if (svg) while (svg.firstChild) svg.removeChild(svg.firstChild);
+  }
+  const tbl = document.getElementById(`tbl-${which}`);
+  if (tbl) tbl.innerHTML = '';
 }
 </script>
 </body></html>
