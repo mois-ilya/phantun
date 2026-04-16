@@ -1,0 +1,42 @@
+# Dockerfile for udp2raw used by the local compare harness.
+#
+# Builds udp2raw from upstream (https://github.com/wangyu-/udp2raw) at a pinned
+# tag so the baseline capture is reproducible. Only the "dynamic" make target
+# is used: it links against the system libstdc++, so the runtime image needs
+# libstdc++ plus iptables (udp2raw's `-a` flag installs iptables rules at
+# startup to block the host kernel's reply to the FakeTCP packets).
+#
+# Pin rationale: tag 20230206.0 is the most recent release on the upstream
+# `wangyu-/udp2raw` repo (as of 2026-04-16). Using an explicit tag (not
+# master) keeps the baseline stable across re-runs on different hosts.
+#
+# The image is consumed by docker-compose.udp2raw.yml; it is not intended for
+# production use.
+
+# Builder pinned to alpine:3.16 — newer alpine ships linux-headers 6.x where
+# `sockaddr_ll` uses `__DECLARE_FLEX_ARRAY`, which breaks udp2raw's
+# `struct packet_info_t { sockaddr_ll; i32_t data_len; }` layout (flex-array
+# must be last member). 3.16 ships kernel 5.15 headers that still work.
+FROM alpine:3.16 AS builder
+
+ARG UDP2RAW_REF=20230206.0
+
+RUN apk add --no-cache git build-base linux-headers
+
+WORKDIR /src
+RUN git clone --depth 1 --branch "${UDP2RAW_REF}" https://github.com/wangyu-/udp2raw.git .
+
+# `make dynamic` links against system libstdc++ and skips libpcap, which is
+# all we need for a container runtime. The default `make` target adds `-static`
+# and needs a static libstdc++ that alpine doesn't ship by default.
+RUN make dynamic \
+ && install -Dm755 udp2raw_dynamic /out/udp2raw
+
+FROM alpine:3.19
+
+RUN apk add --no-cache libstdc++ iptables ip6tables
+
+COPY --from=builder /out/udp2raw /usr/local/bin/udp2raw
+
+# No ENTRYPOINT — docker-compose.udp2raw.yml supplies the client-/server-mode
+# arguments for each role so the same image covers both.

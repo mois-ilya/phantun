@@ -1,0 +1,173 @@
+# Local compare harness — udp2raw side (baseline).
+# See docs/plans/20260416-local-compare-harness.md.
+#
+# This file mirrors docker-compose.phantun.yml one-to-one: same subnet
+# (100.64.240.0/24), same IPs, same echo backend, same iperf3 generator, same
+# capturer sidecar. Only the tunnel implementation changes — phantun's
+# client/server binaries are swapped for udp2raw in FakeTCP mode.
+#
+# Usage:
+#   docker compose -f docker/compare/docker-compose.udp2raw.yml up --build \
+#     --abort-on-container-exit --exit-code-from generator || true
+#
+# The harness is intended to be brought up one implementation at a time; the
+# network object (`udp2raw-compare`) is distinct from phantun's so parallel
+# runs don't clash if someone ever tries.
+
+name: udp2raw-compare
+
+services:
+  udp-echo:
+    image: alpine:3.19
+    container_name: udp2raw-compare-udp-echo
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache socat >/dev/null
+        exec socat -v UDP4-LISTEN:${UDP_ECHO_PORT:-5000},fork,reuseaddr EXEC:cat
+    networks:
+      udp2raw-compare:
+        ipv4_address: 100.64.240.10
+
+  udp2raw-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.udp2raw
+    image: udp2raw-compare:latest
+    container_name: udp2raw-compare-server
+    depends_on:
+      - udp-echo
+    # udp2raw uses raw sockets and, with `-a`, installs iptables rules to block
+    # the kernel from RSTing its FakeTCP stream — so both capabilities are
+    # required.
+    cap_add: [NET_ADMIN, NET_RAW]
+    command:
+      - udp2raw
+      - -s
+      - -l
+      - "0.0.0.0:${PHANTUN_TCP_PORT:-4567}"
+      - -r
+      - "100.64.240.10:${UDP_ECHO_PORT:-5000}"
+      - -k
+      - "${PHANTUN_KEY:-compare-harness-local}"
+      - --raw-mode
+      - faketcp
+      - -a
+    networks:
+      udp2raw-compare:
+        ipv4_address: 100.64.240.20
+
+  udp2raw-client:
+    image: udp2raw-compare:latest
+    container_name: udp2raw-compare-client
+    depends_on:
+      udp2raw-server:
+        condition: service_started
+    cap_add: [NET_ADMIN, NET_RAW]
+    command:
+      - udp2raw
+      - -c
+      - -l
+      - "0.0.0.0:${PHANTUN_LOCAL_UDP:-4500}"
+      - -r
+      - "100.64.240.20:${PHANTUN_TCP_PORT:-4567}"
+      - -k
+      - "${PHANTUN_KEY:-compare-harness-local}"
+      - --raw-mode
+      - faketcp
+      - -a
+    networks:
+      udp2raw-compare:
+        ipv4_address: 100.64.240.30
+
+  capturer:
+    build:
+      context: .
+      dockerfile: Dockerfile.capturer
+    image: phantun-compare-capturer:latest
+    container_name: udp2raw-compare-capturer
+    depends_on:
+      udp2raw-client:
+        condition: service_started
+    network_mode: "container:udp2raw-compare-client"
+    cap_add: [NET_ADMIN, NET_RAW]
+    stop_grace_period: 8s
+    volumes:
+      - ./captures:/captures
+    command:
+      - -c
+      - |
+        set -eu
+        : > /captures/udp2raw.txt
+        tcpdump -i eth0 -s 0 -U -w /captures/udp2raw.pcap "tcp and port ${PHANTUN_TCP_PORT:-4567}" &
+        PID=$$!
+        finish() {
+          kill -TERM $$PID 2>/dev/null || true
+          wait $$PID 2>/dev/null || true
+          tcpdump -r /captures/udp2raw.pcap -nn -tt -S -e -v > /captures/udp2raw.txt 2>/dev/null || true
+          exit 0
+        }
+        trap finish TERM INT
+        wait $$PID
+
+  # Constant-rate UDP generator. iperf3 can't be used because it opens a TCP
+  # control channel that phantun/udp2raw (UDP-only tunnels) can't forward. A
+  # small Python loop delivers the same ~1 Mbit/s, 200-byte-payload, 30-second
+  # pattern the plan calls for, without any TCP dependency.
+  generator:
+    image: python:3.12-alpine
+    container_name: udp2raw-compare-generator
+    depends_on:
+      capturer:
+        condition: service_started
+    entrypoint: []
+    environment:
+      TARGET_HOST: "100.64.240.30"
+      TARGET_PORT: "${PHANTUN_LOCAL_UDP:-4500}"
+      BITRATE_BPS: "1000000"
+      PAYLOAD_BYTES: "200"
+      DURATION_S: "30"
+      STARTUP_DELAY_S: "3"
+    command:
+      - sh
+      - -c
+      - |
+        sleep "$$STARTUP_DELAY_S"
+        exec python3 -u -c '
+        import os, socket, time
+        host = os.environ["TARGET_HOST"]
+        port = int(os.environ["TARGET_PORT"])
+        bps = int(os.environ["BITRATE_BPS"])
+        size = int(os.environ["PAYLOAD_BYTES"])
+        dur = float(os.environ["DURATION_S"])
+        interval = size * 8 / bps
+        payload = bytes(size)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        next_send = time.monotonic()
+        end = next_send + dur
+        sent = 0
+        while True:
+            now = time.monotonic()
+            if now >= end:
+                break
+            sock.sendto(payload, (host, port))
+            sent += 1
+            next_send += interval
+            delay = next_send - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+        print(f"generator: sent {sent} packets in {dur:.0f}s "
+              f"({sent*size*8/dur/1000:.1f} kbit/s)")
+        '
+    networks:
+      udp2raw-compare:
+        ipv4_address: 100.64.240.40
+
+networks:
+  udp2raw-compare:
+    name: udp2raw-compare
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "${BRIDGE_SUBNET:-100.64.240.0/24}"

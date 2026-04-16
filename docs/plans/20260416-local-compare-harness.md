@@ -126,10 +126,18 @@ Unit-тесты для JS-парсера tcpdump и manifest-валидатор 
 - Create: `docker/compare/Dockerfile.udp2raw`
 - Create: `docker/compare/docker-compose.udp2raw.yml`
 
-- [ ] `Dockerfile.udp2raw`: сборка udp2raw из upstream (зафиксировать коммит-SHA или релиз-тег). Multi-stage в минимальный runtime.
-- [ ] `docker-compose.udp2raw.yml`: те же сервисы `udp-echo`, `generator`, `capturer` (идентичная конфигурация), но `udp2raw-server` и `udp2raw-client` вместо phantun. Тот же bridge, те же IP-адреса, тот же XOR-ключ, те же UDP-порты.
-- [ ] Ручной smoke: `docker compose -f docker/compare/docker-compose.udp2raw.yml up --abort-on-container-exit` — iperf3 через udp2raw проходит, пакеты в `captures/` есть.
-- [ ] Визуально сравнить размер/количество пакетов в capture с phantun-прогоном — должны быть сравнимы по объёму (разница в fingerprint-параметрах нормальна).
+- [x] `Dockerfile.udp2raw`: сборка udp2raw из upstream (зафиксировать коммит-SHA или релиз-тег). Multi-stage в минимальный runtime. Запинен тег `20230206.0` (commit `e5ecd33ec4c25d499a14213a5d1dbd5d21e0dd63`). Builder использует `alpine:3.16` — на более новых alpine ядерные headers ломают сборку из-за `__DECLARE_FLEX_ARRAY` в `sockaddr_ll` (flex-array не в конце struct). Runtime — `alpine:3.19` с `libstdc++ iptables ip6tables`.
+- [x] `docker-compose.udp2raw.yml`: те же сервисы `udp-echo`, `generator`, `capturer` (идентичная конфигурация), но `udp2raw-server` и `udp2raw-client` вместо phantun. Тот же bridge, те же IP-адреса, тот же XOR-ключ, те же UDP-порты.
+- [x] Ручной smoke: `docker compose -f docker/compare/docker-compose.udp2raw.yml up --abort-on-container-exit` — udp2raw-handshake проходит, генератор шлёт 18750 пакетов (1000 kbit/s × 30s × 200B), echo возвращает их, capturer пишет `captures/udp2raw.txt` (~74000 строк).
+- [x] Визуально сравнить размер/количество пакетов в capture с phantun-прогоном — должны быть сравнимы по объёму (разница в fingerprint-параметрах нормальна). phantun: 74794 строк / 11 MB pcap, udp2raw: 74402 строк / 12 MB pcap — сравнимо.
+
+➕ **Отклонение от плана:** по ходу Task 2 обнаружены три бага, которые ломали оба стенда (phantun compose не был protested до конца в Task 1, потому Docker daemon был недоступен):
+  - `iperf3 -c ... -u -p 4500` требует TCP control-канал на том же порту — phantun/udp2raw форвардят только UDP, connection refused. **Fix:** заменили iperf3 на python3-one-liner (`python:3.12-alpine`), constant-rate UDP-генератор, те же параметры (1 Mbit/s, 200-байтовые пакеты, 30 секунд).
+  - `socat UDP-LISTEN` на современном socat в alpine:3.19 падает с `unknown address family 0` при `reuseaddr`. **Fix:** `UDP4-LISTEN` (явный IPv4).
+  - phantun-server/client в Docker без iptables/ip_forward получают RST от хостового kernel на fake-TCP трафик. **Fix:** в обоих сервисах `sysctls: net.ipv4.ip_forward=1` + iptables PREROUTING DNAT (server) / POSTROUTING MASQUERADE (client) по README.
+  Оба изменения внесены и в `docker-compose.phantun.yml` (Task 1 файл) — иначе topology не считается "идентичной по структуре".
+
+⚠️ **Известный косметический момент:** TTL на eth0 в capture — 64, а не 65 (как mimic-настройки phantun). Причина — MASQUERADE/IP forwarding декрементирует TTL на 1 при переходе TUN→eth0. Оба стенда (phantun и udp2raw) одинаково теряют этот hop, поэтому сравнение честное. Если понадобится видеть honest TTL — перенести capture на TUN-интерфейс (Task 4/5 вопрос, не Task 2).
 
 ### Task 3: Скрипты capture + serve
 
