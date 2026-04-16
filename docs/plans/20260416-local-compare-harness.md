@@ -4,7 +4,7 @@
 
 Создать детерминированную локальную тестовую среду в Docker, которая одной командой:
 
-1. Поднимает клиент-серверную топологию phantun (из текущего HEAD) с UDP-эхо-сервисом позади и iperf3-нагрузчиком впереди.
+1. Поднимает клиент-серверную топологию phantun (из текущего HEAD) с UDP-эхо-сервисом позади и constant-rate UDP-генератором впереди (python3 one-liner в `python:3.12-alpine`).
 2. Снимает tcpdump с bridge-стороны phantun-клиента во время прогона.
 3. Кладёт результат в `docs/runs/phantun-<timestamp>.txt` и обновляет `docs/runs/manifest.local.json` (локальный, gitignored — коммитится только `manifest.json` с baseline).
 
@@ -22,9 +22,9 @@
 
 ### Что harness делает и чего НЕ делает
 
-**Делает**: даёт детерминированный regression-сигнал — «изменил код → метрики в HTML изменились / не изменились». Это позволяет локально видеть эффект правок на структуру TCP-потока в фиксированных условиях (iperf3 constant-rate).
+**Делает**: даёт детерминированный regression-сигнал — «изменил код → метрики в HTML изменились / не изменились». Это позволяет локально видеть эффект правок на структуру TCP-потока в фиксированных условиях (constant-rate UDP).
 
-**НЕ делает**: не заменяет реальный ТСПУ-тестинг и не воспроизводит **в точности** тот fingerprint-дефект, который мы видели в Nuremberg/Relay дампах. Живые дампы — это WireGuard-паттерн (разрозненные пакеты + heartbeat'ы раз в 600ms), harness — это iperf3 constant stream 625 packets/sec. Frozen ACK и burst под постоянной нагрузкой возникают по частично другим причинам (кумуляция ACK у получателя под нагрузкой). Harness — инструмент **regression-проверки**, не replay реального fingerprint'а. Валидация против ТСПУ остаётся manual step после деплоя.
+**НЕ делает**: не заменяет реальный ТСПУ-тестинг и не воспроизводит **в точности** тот fingerprint-дефект, который мы видели в Nuremberg/Relay дампах. Живые дампы — это WireGuard-паттерн (разрозненные пакеты + heartbeat'ы раз в 600ms), harness — это constant UDP stream 625 packets/sec. Frozen ACK и burst под постоянной нагрузкой возникают по частично другим причинам (кумуляция ACK у получателя под нагрузкой). Harness — инструмент **regression-проверки**, не replay реального fingerprint'а. Валидация против ТСПУ остаётся manual step после деплоя.
 
 ### Acceptance criteria
 
@@ -47,7 +47,7 @@
 ### Зависимости
 
 - **udp2raw** — Dockerfile собирает из исходников (https://github.com/wangyu-/udp2raw-tunnel), фиксируем коммит-SHA или релиз-тег.
-- **iperf3** — один конкретный образ, запиненный по digest или версии (решаем в Task 1).
+- **Constant-rate UDP generator** — `python:3.12-alpine` (одна минорная версия зафиксирована через тег). Шлёт 625 pps × 200 байт = 1 Mbit/s, 30 секунд. Исходно в плане стоял iperf3 — не подошёл: iperf3 требует TCP control-канал на том же порту, что и UDP data (5201); UDP-only туннель phantun/udp2raw его не прокидывает, handshake падает до старта теста. Подробнее — см. Task 2 deviation notes.
 - **tcpdump** — `alpine:3.19` + `apk add tcpdump`. Post-process (pcap → text) **внутри** контейнера — macOS BSD tcpdump даёт немного другой формат.
 - **socat** — `socat -v UDP-LISTEN:5000,fork EXEC:cat` в команде одной строки в compose.
 - Python 3 — уже есть на macOS/Linux, нужен для `-m http.server` и однострочного `python3 -c "import json; ..."` в bash для обновления manifest.
@@ -56,7 +56,7 @@
 
 - macOS: Docker работает внутри Linux VM. Bridge-интерфейсы доступны только из контейнеров. Решение — tcpdump как sidecar-контейнер с `--network=container:phantun-client`, снимающий eth0 целевого контейнера (это bridge-сторона с точки зрения сети).
 - phantun требует `CAP_NET_ADMIN` для создания TUN — фиксируем в compose.
-- iperf3 через UDP имеет свой control-канал TCP/5201, который не должен попадать в capture — ограничиваем tcpdump фильтром по портам/хостам phantun.
+- Capture filter узкий (`tcp and port ${PHANTUN_TCP_PORT}`), не замусоривается служебным трафиком генератора или DNS-резолвом.
 
 ## Development Approach
 
@@ -70,7 +70,7 @@
 
 Здесь нет unit-тестов в привычном смысле — основной инструмент верификации это **end-to-end smoke runs**:
 
-- **Task 1 smoke**: `docker compose -f docker/compare/docker-compose.phantun.yml up` поднимается, iperf3 проходит, UDP-echo отвечает, никто не падает.
+- **Task 1 smoke**: `docker compose -f docker/compare/docker-compose.phantun.yml up` поднимается, generator отстрелялся, UDP-echo отвечает, никто не падает.
 - **Task 2 smoke**: `scripts/capture-run.sh --notes "initial"` отрабатывает до конца, в `docs/runs/` появляется файл, `manifest.local.json` обновлён.
 - **Task 3 smoke**: `scripts/capture-baseline.sh` отрабатывает, `docs/runs/baseline-udp2raw.txt` валиден (парсится существующим JS-парсером).
 - **Task 4 smoke**: `scripts/serve-compare.sh` → открываем `http://localhost:8000/packet-compare.html` → селектор прогонов виден, все панели рисуются.
@@ -106,7 +106,6 @@ Unit-тесты для JS-парсера tcpdump и manifest-валидатор 
 - [x] Зафиксировать значения как inline-дефолты в compose (`${VAR:-default}`):
   - `PHANTUN_TCP_PORT=4567` — fake-TCP client→server (capture filter = только этот порт)
   - `PHANTUN_LOCAL_UDP=4500` — UDP-listen phantun-client (вход от generator)
-  - `IPERF_PORT=5201` — iperf3
   - `UDP_ECHO_PORT=5000` — echo-backend
   - `PHANTUN_KEY=compare-harness-local` — фиксированный ключ, одинаковый в обеих compose
   - `BRIDGE_SUBNET=100.64.240.0/24` — CGNAT-диапазон, не конфликтует с VPN/корп-сетями
@@ -115,7 +114,7 @@ Unit-тесты для JS-парсера tcpdump и manifest-валидатор 
 - [x] `docker-compose.phantun.yml`: сервисы:
   - `udp-echo` — `alpine:3.19` + однострочник socat в `command:`
   - `phantun-server`, `phantun-client` — `cap_add: [NET_ADMIN]`, `devices: ["/dev/net/tun:/dev/net/tun"]`, фиксированные IP в custom bridge `phantun-compare` (subnet через `${BRIDGE_SUBNET:-...}`)
-  - `generator` — запиненный iperf3-образ. Команда: `sh -c "sleep 3 && iperf3 -c phantun-client -u -b 1M -l 200 -t 30"`. Sleep 3s — единственный sync-механизм с capturer'ом (у phantun userspace TCP, kernel-healthcheck не работает). Exit code обёрнут в `|| true` в `capture-run.sh` — iperf3 может вернуть non-zero при packet loss.
+  - `generator` — `python:3.12-alpine`. Команда: `sh -c "sleep 3 && python3 -c 'import socket, time; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); p=b\"x\"*200; end=time.time()+30; i=0; step=1/625.0; t=time.time()\nwhile time.time()<end: s.sendto(p, (\"phantun-client\", 4500)); i+=1; t+=step; d=t-time.time(); time.sleep(d) if d>0 else None\nprint(i)'"`. 625 pps × 200 байт = 1 Mbit/s, 30 секунд, ровно 18 750 пакетов. Sleep 3s — единственный sync-механизм с capturer'ом (у phantun userspace TCP, kernel-healthcheck не работает). Exit code обёрнут в `|| true` в `capture-run.sh`. Детали про замену iperf3 → python3 — в Task 2 deviation notes и в `Technical Details` → «Фиксированные параметры прогона».
   - `capturer` — **собирается из `Dockerfile.capturer`** (tcpdump preinstalled), `network_mode: "container:phantun-client"`, `cap_add: [NET_ADMIN, NET_RAW]`, `stop_grace_period: 8s`, `depends_on: { phantun-client: { condition: service_started } }`. Фильтр `tcp and port ${PHANTUN_TCP_PORT}`, snaplen `-s 0`, флаг `-U` (packet-buffered). Trap на SIGTERM/SIGINT: корректный kill+wait pcap-писателя, затем `tcpdump -r ... -nn -tt -S -e -v > /captures/phantun.txt` (**важно**: `-e -v` обязательны — JS-парсер в `docs/packet-compare.html:1138` ожидает two-line формат с Ethernet-заголовком и IP `id`, без них HTML почти ничего не распарсит). См. Technical Details для точного snippet'а.
 - [x] Ручной smoke: `docker compose -f docker/compare/docker-compose.phantun.yml up --abort-on-container-exit --exit-code-from generator || true` — все поднялись, generator отстрелялся, capturer записал `captures/phantun.txt` ненулевого размера с осмысленным tcpdump-выводом (хотя бы 500 строк для 30-секундного 1Mbit/s прогона). (skipped — Docker daemon not available on dev host; `docker compose -f docker/compare/docker-compose.phantun.yml config` validates the file structure. Defer live smoke to Task 6 / first use on a Docker-enabled host.)
 - [x] Никаких unit-тестов — это инфраструктура.
@@ -148,7 +147,7 @@ Unit-тесты для JS-парсера tcpdump и manifest-валидатор 
 
 - [ ] `capture-run.sh [--notes "..."]`:
   - `trap 'docker compose -f ... down -v' EXIT INT TERM` в начале — cleanup при Ctrl+C.
-  - `docker compose -f docker/compare/docker-compose.phantun.yml up --build --abort-on-container-exit --exit-code-from generator || true` (не падаем на non-zero iperf3).
+  - `docker compose -f docker/compare/docker-compose.phantun.yml up --build --abort-on-container-exit --exit-code-from generator || true` (не падаем на non-zero exit от generator).
   - Копировать `captures/phantun.txt` → `docs/runs/phantun-<ts>-<sha>.txt`. Timestamp с секундами + короткий git-SHA. Если файл уже есть — суффикс `-2`, `-3`, ... до свободного имени.
   - Sanity check: файл не пуст и содержит хотя бы одну tcpdump-строку (`grep -q 'IP '`).
   - Обновить `docs/runs/manifest.local.json` inline через `python3 -c`:
@@ -244,7 +243,6 @@ docs/
 |---|---|---|---|
 | `PHANTUN_TCP_PORT` | 4567 | TCP | fake-TCP phantun-client → phantun-server. **Единственный порт в capture filter.** |
 | `PHANTUN_LOCAL_UDP` | 4500 | UDP | phantun-client слушает generator локально |
-| `IPERF_PORT` | 5201 | UDP+TCP | iperf3 data (UDP) + control (TCP). TCP-control на 5201 НЕ попадает в capture (фильтр `port 4567`). |
 | `UDP_ECHO_PORT` | 5000 | UDP | echo-backend за phantun-server |
 
 Capture filter (tcpdump): `tcp and port ${PHANTUN_TCP_PORT}`, snaplen `-s 0`.
@@ -257,7 +255,7 @@ Capture filter (tcpdump): `tcp and port ${PHANTUN_TCP_PORT}`, snaplen `-s 0`.
     "file": "baseline-udp2raw.txt",
     "created": "2026-04-16T14:55:12Z",
     "tool_version": "udp2raw-mp v20200818.0",
-    "generator": "iperf3 -u -b 1M -l 200 -t 30",
+    "generator": "python3 UDP constant-rate 1Mbit/s 200B 30s (625 pps)",
     "capture_point": "phantun-client eth0 (bridge side)",
     "capture_filter": "tcp and port 4567"
   }
@@ -319,7 +317,7 @@ Post-process (pcap → text) выполняется **внутри** того ж
 ### Фиксированные параметры прогона
 
 - `PHANTUN_KEY=compare-harness-local` (одинаковый в обеих compose, inline-дефолт)
-- iperf3: `-u -b 1M -l 200 -t 30` (UDP, 1Мбит/с, 200-байтовый payload, 30 секунд). Запиненный образ/версия.
+- Generator: `python:3.12-alpine`, inline python3-one-liner. Constant-rate: 625 pps × 200 B = 1 Mbit/s, 30 секунд, ровно 18 750 пакетов. Почему не iperf3: iperf3 открывает TCP control-канал на 5201 параллельно с UDP data; UDP-only туннель phantun/udp2raw его не прокидывает → handshake падает. Python3-скрипт проще, детерминистичнее и не требует control-канала.
 - Capture filter: `tcp and port ${PHANTUN_TCP_PORT:-4567}`
 - Bridge subnet: `100.64.240.0/24` (CGNAT)
 
