@@ -1,0 +1,587 @@
+<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>TCP Dump Compare — phantun vs udp2raw</title><style>
+*,::before,::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Menlo,Consolas,monospace;background:#141414;color:#c9c9c9;padding:2rem;max-width:1600px;margin:0 auto;line-height:1.5;font-size:13px}
+h1{font-size:1.1rem;color:#e8e8e8;margin-bottom:.2rem;letter-spacing:.05em;text-transform:uppercase}
+h2{font-size:.8rem;color:#aaa;margin:2rem 0 .5rem;text-transform:uppercase;letter-spacing:.1em}
+h3{font-size:.82rem;color:#c9c9c9;margin:1rem 0 .4rem}
+.subtitle{color:#888;font-size:.78rem;margin-bottom:1.5rem}
+.banner{background:#2a1e1e;border:1px solid #5a3a3a;color:#d7a86a;padding:12px 16px;margin-bottom:1.5rem;font-size:.8rem;line-height:1.6}
+.banner code{background:#1a1414;padding:1px 5px;color:#e8c9a0;border-radius:2px}
+.selector{display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-bottom:.5rem;padding:10px 14px;background:#181818;border:1px solid #222}
+.selector label{color:#888;font-size:.72rem;text-transform:uppercase;letter-spacing:.08em}
+.selector select{background:#1e1e1e;border:1px solid #2a2a2a;color:#e8e8e8;padding:5px 10px;font-family:inherit;font-size:.75rem;min-width:320px}
+.selector .baseline-label{color:#8fc98f;font-size:.75rem}
+.meta{font-size:.7rem;color:#888;margin-bottom:1.2rem;padding:6px 14px;background:#161616;border:1px solid #1e1e1e}
+.meta .k{color:#666;margin-right:4px}
+.meta .v{color:#c9c9c9;margin-right:14px;font-variant-numeric:tabular-nums}
+.empty{padding:24px;text-align:center;color:#888;font-size:.8rem;background:#181818;border:1px dashed #2a2a2a;margin-bottom:1.5rem}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.col{background:#181818;border:1px solid #222;padding:14px}
+.col h3{margin-top:0;color:#8fc98f;border-bottom:1px solid #222;padding-bottom:6px}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;font-size:.75rem;margin-bottom:12px}
+.stats .k{color:#888}
+.stats .v{color:#e8e8e8;text-align:right}
+.stats .v.warn{color:#d7a86a}
+.stats .v.bad{color:#d76a6a}
+.stats .v.ok{color:#8fc98f}
+svg{display:block;width:100%;background:#111;border:1px solid #222}
+svg text{font-family:Menlo,monospace;font-size:10px;fill:#888}
+.legend{display:flex;gap:14px;font-size:.7rem;color:#999;margin:6px 0 10px}
+.legend .dot{display:inline-block;width:10px;height:10px;vertical-align:middle;margin-right:4px;border-radius:2px}
+table{width:100%;border-collapse:collapse;font-size:.72rem;margin-top:.5rem}
+th{text-align:left;color:#888;font-weight:normal;padding:4px 6px;border-bottom:1px solid #2a2a2a;font-size:.65rem;text-transform:uppercase;letter-spacing:.06em;position:sticky;top:0;background:#181818}
+td{padding:3px 6px;border-bottom:1px solid #1e1e1e;color:#aaa;white-space:nowrap;font-family:Menlo,monospace}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+td.dir-up{color:#d7a86a}
+td.dir-dn{color:#6aaed7}
+tr.burst td{background:#2a1e1e}
+tr.frozen td{background:#1e1e2a}
+.tbl-wrap{max-height:360px;overflow:auto;border:1px solid #222;background:#111}
+.histbar{fill:#6aaed7}
+.histbar.up{fill:#d7a86a}
+.hist-label{font-size:9px}
+.tip{position:fixed;background:#222;border:1px solid #444;padding:6px 10px;font-size:11px;color:#e8e8e8;pointer-events:none;display:none;z-index:10;white-space:pre;border-radius:3px}
+details{margin-top:1.5rem}
+summary{cursor:pointer;font-size:.78rem;color:#aaa;padding:6px 0;text-transform:uppercase;letter-spacing:.08em}
+.note{margin-top:10px;padding:8px 12px;border-left:2px solid #3a5a3a;background:#161e16;font-size:.72rem;color:#6a8a6a;line-height:1.6}
+</style></head><body>
+<h1>TCP Dump Compare</h1>
+<p class="subtitle">phantun vs udp2raw — визуальная диагностика отличий в TCP-потоке. Выберите phantun-прогон слева, baseline udp2raw — справа (статический).</p>
+
+<div id="file-banner" class="banner" style="display:none">
+  Откройте через <code>scripts/serve-compare.sh</code> → <code>http://localhost:8000/packet-compare.html</code> — <code>file://</code> не работает из-за CORS.
+</div>
+
+<div id="empty-state" class="empty" style="display:none">
+  Нет прогонов. Запустите <code>scripts/capture-baseline.sh</code> и <code>scripts/capture-run.sh</code>.
+</div>
+
+<div id="main-ui" style="display:none">
+  <div class="selector">
+    <label for="run-select">Phantun run</label>
+    <select id="run-select"></select>
+    <span class="baseline-label" id="baseline-label">Baseline: не выбран</span>
+  </div>
+  <div class="meta" id="run-meta"></div>
+
+  <div class="cols">
+    <div class="col" id="col-selected">
+      <h3 id="title-selected">phantun</h3>
+      <div class="stats" id="stats-selected"></div>
+      <div class="legend">
+        <span><span class="dot" style="background:#d7a86a"></span>исходящий (up)</span>
+        <span><span class="dot" style="background:#6aaed7"></span>входящий (down)</span>
+      </div>
+      <div><strong style="font-size:.7rem;color:#888">TIMELINE (размер пакета vs время)</strong></div>
+      <svg id="tl-selected" height="220"></svg>
+      <div style="margin-top:10px"><strong style="font-size:.7rem;color:#888">SIZE HISTOGRAM</strong></div>
+      <svg id="hist-selected" height="180"></svg>
+      <div style="margin-top:10px"><strong style="font-size:.7rem;color:#888">SEQ / ACK EVOLUTION</strong></div>
+      <svg id="seq-selected" height="180"></svg>
+    </div>
+    <div class="col" id="col-baseline">
+      <h3 id="title-baseline">udp2raw (baseline)</h3>
+      <div class="stats" id="stats-baseline"></div>
+      <div class="legend">
+        <span><span class="dot" style="background:#d7a86a"></span>исходящий (up)</span>
+        <span><span class="dot" style="background:#6aaed7"></span>входящий (down)</span>
+      </div>
+      <div><strong style="font-size:.7rem;color:#888">TIMELINE (размер пакета vs время)</strong></div>
+      <svg id="tl-baseline" height="220"></svg>
+      <div style="margin-top:10px"><strong style="font-size:.7rem;color:#888">SIZE HISTOGRAM</strong></div>
+      <svg id="hist-baseline" height="180"></svg>
+      <div style="margin-top:10px"><strong style="font-size:.7rem;color:#888">SEQ / ACK EVOLUTION</strong></div>
+      <svg id="seq-baseline" height="180"></svg>
+    </div>
+  </div>
+
+  <div class="note">
+    <strong>Подсветка в таблице:</strong> красная строка = burst (≥3 пакетов от одной стороны за &lt;1 мс); синяя строка = frozen ACK/TSecr (ack не меняется ≥3 подряд у одной стороны). Hover по точкам таймлайна — подробности пакета.
+  </div>
+
+  <details open><summary>Raw packet table (selected phantun)</summary><div class="tbl-wrap"><table id="tbl-selected"></table></div></details>
+  <details><summary>Raw packet table (baseline udp2raw)</summary><div class="tbl-wrap"><table id="tbl-baseline"></table></div></details>
+</div>
+
+<div class="tip" id="tip"></div>
+
+
+<script>
+const tip = document.getElementById('tip');
+function showTip(e, t){tip.textContent=t;tip.style.display='block';tip.style.left=(e.clientX+12)+'px';tip.style.top=(e.clientY+12)+'px';}
+function hideTip(){tip.style.display='none';}
+
+// Parse tcpdump verbose output. Every packet = 2 lines.
+// Line 1: "<ts> <mac> > <mac>, ethertype IPv4 (0x0800), length <NNN>: (tos ..., id <ID>, ... length <IPLEN>)"
+// Line 2: "    <src>.<sport> > <dst>.<dport>: Flags [<F>], cksum ..., seq <A>[:<B>], [ack <N>,] win <W>[, options [..., TS val <V> ecr <E>]], length <L>"
+function parseDump(text){
+  const lines = text.split('\n');
+  const packets = [];
+  let meta = null;
+  for (const ln of lines) {
+    const m1 = ln.match(/^(\d+)\.(\d+)\s+[0-9a-f:]+\s+>\s+[0-9a-f:]+,.*?length\s+(\d+):.*?id\s+(\d+)/);
+    if (m1) {
+      meta = { ts: parseInt(m1[1]) + parseInt(m1[2])/1e6, ethLen: +m1[3], ipId: +m1[4] };
+      continue;
+    }
+    const m2 = ln.match(/^\s+([\d.]+|\[[\da-f:]+\])\.(\d+)\s+>\s+([\d.]+|\[[\da-f:]+\])\.(\d+):\s+Flags\s+\[([^\]]*)\]/);
+    if (m2 && meta) {
+      const src = m2[1], sport = +m2[2], dst = m2[3], dport = +m2[4], flags = m2[5];
+      const seq = ln.match(/seq\s+(\d+)(?::(\d+))?/);
+      const ack = ln.match(/\back\s+(\d+)/);
+      const win = ln.match(/win\s+(\d+)/);
+      const ts  = ln.match(/TS val\s+(\d+)\s+ecr\s+(\d+)/);
+      const len = ln.match(/length\s+(\d+)\s*$/);
+      packets.push({
+        ts: meta.ts, ethLen: meta.ethLen, ipId: meta.ipId,
+        src, sport, dst, dport, flags,
+        seq:  seq ? +seq[1] : null,
+        seqE: seq && seq[2] ? +seq[2] : (seq ? +seq[1] : null),
+        ack:  ack ? +ack[1] : null,
+        win:  win ? +win[1] : null,
+        tsv:  ts ? +ts[1] : null,
+        tse:  ts ? +ts[2] : null,
+        len:  len ? +len[1] : 0,
+      });
+      meta = null;
+    }
+  }
+  return packets;
+}
+
+// Determine "up" (client→server) vs "down" direction.
+// We pick direction of the first packet as "up" by default;
+// caller can override by specifying serverEndpoint.
+function tagDirection(pkts){
+  if (pkts.length === 0) return pkts;
+  // Count packets per endpoint-pair direction; the one whose src is server port = down.
+  // Heuristic: the endpoint that appears as dst more often receives = "server".
+  const counts = {};
+  for (const p of pkts){
+    const a = `${p.src}:${p.sport}`, b = `${p.dst}:${p.dport}`;
+    counts[a] = counts[a] || {sent:0, recv:0};
+    counts[b] = counts[b] || {sent:0, recv:0};
+    counts[a].sent++; counts[b].recv++;
+  }
+  // server = endpoint with more recv than sent, or lowest port as tiebreak.
+  const eps = Object.keys(counts);
+  eps.sort((x,y)=>{
+    const dx = counts[x].recv - counts[x].sent, dy = counts[y].recv - counts[y].sent;
+    if (dx !== dy) return dy - dx;
+    return parseInt(x.split(':').pop()) - parseInt(y.split(':').pop());
+  });
+  const server = eps[0];
+  for (const p of pkts){
+    const s = `${p.src}:${p.sport}`;
+    p.dir = s === server ? 'dn' : 'up'; // up = client→server
+  }
+  return pkts;
+}
+
+function computeStats(pkts){
+  const N = pkts.length;
+  const dur = N ? pkts[N-1].ts - pkts[0].ts : 0;
+  const sizes = pkts.map(p=>p.len);
+  const uniqSizes = new Set(sizes).size;
+  const windows = pkts.map(p=>p.win).filter(w=>w!=null);
+  const uniqWins = new Set(windows).size;
+  const ack0 = pkts.filter(p=>p.ack===0 && p.len>0).length;
+  // burst: ≥3 pkts same dir within 1ms
+  let maxBurst = 0, curBurst = 1, curDir = pkts[0]?.dir;
+  for (let i=1;i<N;i++){
+    const dt = pkts[i].ts - pkts[i-1].ts;
+    if (dt < 0.001 && pkts[i].dir === curDir) curBurst++;
+    else { if (curBurst > maxBurst) maxBurst = curBurst; curBurst = 1; curDir = pkts[i].dir; }
+  }
+  if (curBurst > maxBurst) maxBurst = curBurst;
+  // frozen ack: max consecutive same-direction packets with identical ack
+  let maxFrozen = 0;
+  for (const dir of ['up','dn']){
+    const sub = pkts.filter(p=>p.dir===dir && p.ack!=null);
+    let cur = 1;
+    for (let i=1;i<sub.length;i++){
+      if (sub[i].ack === sub[i-1].ack) cur++;
+      else { if (cur>maxFrozen) maxFrozen=cur; cur=1; }
+    }
+    if (cur>maxFrozen) maxFrozen=cur;
+  }
+  // frozen tsecr
+  let maxFrozenTs = 0;
+  for (const dir of ['up','dn']){
+    const sub = pkts.filter(p=>p.dir===dir && p.tse!=null);
+    let cur = 1;
+    for (let i=1;i<sub.length;i++){
+      if (sub[i].tse === sub[i-1].tse) cur++;
+      else { if (cur>maxFrozenTs) maxFrozenTs=cur; cur=1; }
+    }
+    if (cur>maxFrozenTs) maxFrozenTs=cur;
+  }
+  // most common size (mode)
+  const sizeCount = {};
+  for (const s of sizes) sizeCount[s] = (sizeCount[s]||0)+1;
+  const entries = Object.entries(sizeCount).sort((a,b)=>b[1]-a[1]);
+  const top = entries.slice(0,3).map(([s,c])=>`${s}×${c}`).join(', ');
+  return {N, dur, uniqSizes, uniqWins, ack0, maxBurst, maxFrozen, maxFrozenTs, top, sizes, sizeCount};
+}
+
+function renderStats(el, s, other){
+  const warn = (v, bad, ok) => {
+    if (bad != null && v >= bad) return 'bad';
+    if (other != null) {
+      if (typeof other === 'number') {
+        if (v > other * 1.5) return 'warn';
+      }
+    }
+    return ok ? 'ok' : '';
+  };
+  const rows = [
+    ['Пакетов', s.N],
+    ['Длительность', s.dur.toFixed(2)+' s'],
+    ['Уникальных размеров', s.uniqSizes, warn(s.uniqSizes, null, null), other?other.uniqSizes:null],
+    ['Уникальных win', s.uniqWins, '', other?other.uniqWins:null],
+    ['ACK=0 (data)', s.ack0, s.ack0>0?'bad':'ok'],
+    ['Max burst (dir, <1ms)', s.maxBurst, s.maxBurst>=3?'warn':'ok'],
+    ['Max frozen ACK', s.maxFrozen, s.maxFrozen>=3?'warn':'ok'],
+    ['Max frozen TSecr', s.maxFrozenTs, s.maxFrozenTs>=3?'warn':'ok'],
+    ['Top sizes', s.top],
+  ];
+  el.innerHTML = rows.map(r=>{
+    const cls = r[2]||'';
+    const comp = r[3]!=null ? `<span style="color:#666;font-size:.65rem"> (vs ${r[3]})</span>` : '';
+    return `<div class="k">${r[0]}</div><div class="v ${cls}">${r[1]}${comp}</div>`;
+  }).join('');
+}
+
+function renderTimeline(svg, pkts){
+  svg.innerHTML = '';
+  if (!pkts.length) return;
+  const W = svg.clientWidth, H = svg.clientHeight, pad = {l:44,r:10,t:10,b:24};
+  const t0 = pkts[0].ts, t1 = pkts[pkts.length-1].ts;
+  const lenMax = Math.max(...pkts.map(p=>p.len), 100);
+  const x = t => pad.l + (t - t0)/(t1 - t0 || 1) * (W - pad.l - pad.r);
+  const y = l => H - pad.b - l / lenMax * (H - pad.t - pad.b);
+  const NS = 'http://www.w3.org/2000/svg';
+  // axes
+  const axis = (x1,y1,x2,y2) => { const ln = document.createElementNS(NS,'line'); ln.setAttribute('x1',x1);ln.setAttribute('y1',y1);ln.setAttribute('x2',x2);ln.setAttribute('y2',y2);ln.setAttribute('stroke','#333');svg.appendChild(ln);};
+  axis(pad.l, H-pad.b, W-pad.r, H-pad.b);
+  axis(pad.l, pad.t, pad.l, H-pad.b);
+  // y labels
+  for (let i=0;i<=4;i++){
+    const v = Math.round(lenMax * i/4);
+    const ty = y(v);
+    const t = document.createElementNS(NS,'text'); t.setAttribute('x',pad.l-6);t.setAttribute('y',ty+3);t.setAttribute('text-anchor','end');t.textContent=v;svg.appendChild(t);
+    axis(pad.l, ty, W-pad.r, ty);
+  }
+  // x labels
+  for (let i=0;i<=4;i++){
+    const v = (t1-t0)*i/4;
+    const tx = pad.l + (W-pad.l-pad.r)*i/4;
+    const t = document.createElementNS(NS,'text'); t.setAttribute('x',tx);t.setAttribute('y',H-pad.b+14);t.setAttribute('text-anchor','middle');t.textContent=v.toFixed(2)+'s';svg.appendChild(t);
+  }
+  // points
+  for (const p of pkts){
+    const c = document.createElementNS(NS,'circle');
+    c.setAttribute('cx', x(p.ts));
+    c.setAttribute('cy', y(p.len));
+    c.setAttribute('r', 2.4);
+    c.setAttribute('fill', p.dir==='up' ? '#d7a86a' : '#6aaed7');
+    c.setAttribute('opacity', 0.75);
+    c.addEventListener('mouseenter', e=>showTip(e,
+      `t=+${(p.ts-t0).toFixed(4)}s  len=${p.len}\n${p.dir==='up'?'→ UP':'← DN'} flags=[${p.flags}]\nseq=${p.seq}${p.seqE!==p.seq?':'+p.seqE:''} ack=${p.ack}\nwin=${p.win}  TSval=${p.tsv} ecr=${p.tse}\nipId=${p.ipId}`));
+    c.addEventListener('mouseleave', hideTip);
+    svg.appendChild(c);
+  }
+}
+
+function renderHistogram(svg, s){
+  svg.innerHTML = '';
+  const W = svg.clientWidth, H = svg.clientHeight, pad = {l:44,r:10,t:10,b:40};
+  const entries = Object.entries(s.sizeCount).map(([k,v])=>[+k, v]).sort((a,b)=>a[0]-b[0]);
+  if (!entries.length) return;
+  const maxCount = Math.max(...entries.map(e=>e[1]));
+  const NS = 'http://www.w3.org/2000/svg';
+  const axis = (x1,y1,x2,y2) => { const ln = document.createElementNS(NS,'line'); ln.setAttribute('x1',x1);ln.setAttribute('y1',y1);ln.setAttribute('x2',x2);ln.setAttribute('y2',y2);ln.setAttribute('stroke','#333');svg.appendChild(ln);};
+  axis(pad.l, H-pad.b, W-pad.r, H-pad.b);
+  axis(pad.l, pad.t, pad.l, H-pad.b);
+  const bw = (W - pad.l - pad.r) / entries.length;
+  for (let i=0;i<entries.length;i++){
+    const [sz, ct] = entries[i];
+    const h = ct / maxCount * (H - pad.t - pad.b);
+    const r = document.createElementNS(NS,'rect');
+    r.setAttribute('x', pad.l + i*bw + 1);
+    r.setAttribute('y', H - pad.b - h);
+    r.setAttribute('width', Math.max(1, bw - 2));
+    r.setAttribute('height', h);
+    r.setAttribute('fill', '#8fc98f');
+    r.setAttribute('opacity', 0.8);
+    r.addEventListener('mouseenter', e=>showTip(e, `size=${sz}B  count=${ct}`));
+    r.addEventListener('mouseleave', hideTip);
+    svg.appendChild(r);
+    // label every few
+    if (entries.length <= 16 || i % Math.ceil(entries.length/12) === 0) {
+      const t = document.createElementNS(NS,'text');
+      t.setAttribute('x', pad.l + i*bw + bw/2);
+      t.setAttribute('y', H - pad.b + 12);
+      t.setAttribute('text-anchor','middle');
+      t.setAttribute('transform', `rotate(-45 ${pad.l + i*bw + bw/2} ${H-pad.b+12})`);
+      t.textContent = sz;
+      svg.appendChild(t);
+    }
+  }
+  // y labels
+  for (let i=0;i<=4;i++){
+    const v = Math.round(maxCount * i/4);
+    const ty = H - pad.b - v/maxCount*(H-pad.t-pad.b);
+    const t = document.createElementNS(NS,'text'); t.setAttribute('x',pad.l-6);t.setAttribute('y',ty+3);t.setAttribute('text-anchor','end');t.textContent=v;svg.appendChild(t);
+  }
+  // annotation
+  const an = document.createElementNS(NS,'text');
+  an.setAttribute('x', W-pad.r); an.setAttribute('y', pad.t+10); an.setAttribute('text-anchor','end');
+  an.setAttribute('fill','#888'); an.textContent = `${entries.length} уник. размеров`;
+  svg.appendChild(an);
+}
+
+function renderSeqAck(svg, pkts){
+  svg.innerHTML = '';
+  const W = svg.clientWidth, H = svg.clientHeight, pad = {l:44,r:10,t:10,b:24};
+  const t0 = pkts[0].ts, t1 = pkts[pkts.length-1].ts;
+  // use relative seq per direction (subtract first seq of that direction)
+  const firstSeq = {}, firstAck = {};
+  for (const p of pkts){
+    if (firstSeq[p.dir] == null) firstSeq[p.dir] = p.seq;
+    if (firstAck[p.dir] == null && p.ack != null) firstAck[p.dir] = p.ack;
+  }
+  const allRel = pkts.map(p => (p.seq ?? 0) - (firstSeq[p.dir] ?? 0));
+  const ackRel = pkts.map(p => p.ack != null && firstAck[p.dir] != null ? p.ack - firstAck[p.dir] : 0);
+  const vmax = Math.max(...allRel, ...ackRel, 1);
+  const NS = 'http://www.w3.org/2000/svg';
+  const axis = (x1,y1,x2,y2) => { const ln = document.createElementNS(NS,'line'); ln.setAttribute('x1',x1);ln.setAttribute('y1',y1);ln.setAttribute('x2',x2);ln.setAttribute('y2',y2);ln.setAttribute('stroke','#333');svg.appendChild(ln);};
+  axis(pad.l, H-pad.b, W-pad.r, H-pad.b);
+  axis(pad.l, pad.t, pad.l, H-pad.b);
+  const x = t => pad.l + (t - t0)/(t1 - t0 || 1) * (W - pad.l - pad.r);
+  const y = v => H - pad.b - v / vmax * (H - pad.t - pad.b);
+  // seq as filled circle, ack as open ring, per direction color
+  for (let i=0;i<pkts.length;i++){
+    const p = pkts[i];
+    const color = p.dir === 'up' ? '#d7a86a' : '#6aaed7';
+    // seq
+    const c = document.createElementNS(NS,'circle');
+    c.setAttribute('cx', x(p.ts)); c.setAttribute('cy', y(allRel[i]));
+    c.setAttribute('r', 1.8); c.setAttribute('fill', color); c.setAttribute('opacity', 0.8);
+    svg.appendChild(c);
+    // ack
+    if (p.ack != null) {
+      const c2 = document.createElementNS(NS,'circle');
+      c2.setAttribute('cx', x(p.ts)); c2.setAttribute('cy', y(ackRel[i]));
+      c2.setAttribute('r', 1.8); c2.setAttribute('fill','none'); c2.setAttribute('stroke', color); c2.setAttribute('stroke-width', 0.8); c2.setAttribute('opacity', 0.6);
+      svg.appendChild(c2);
+    }
+  }
+  // legend inside
+  const leg = document.createElementNS(NS,'text');
+  leg.setAttribute('x', W-pad.r); leg.setAttribute('y', pad.t+10); leg.setAttribute('text-anchor','end');
+  leg.setAttribute('fill','#888'); leg.textContent = '● seq   ○ ack (relative к первому пакету направления)';
+  svg.appendChild(leg);
+}
+
+function renderTable(el, pkts){
+  const t0 = pkts[0]?.ts || 0;
+  // compute burst / frozen-ack flags per packet
+  const flags = pkts.map(()=>({burst:false, frozen:false}));
+  for (let i=2;i<pkts.length;i++){
+    if (pkts[i].dir===pkts[i-1].dir && pkts[i].dir===pkts[i-2].dir){
+      const dt1 = pkts[i].ts - pkts[i-1].ts, dt2 = pkts[i-1].ts - pkts[i-2].ts;
+      if (dt1<0.001 && dt2<0.001){ flags[i].burst=flags[i-1].burst=flags[i-2].burst=true; }
+    }
+  }
+  // frozen ACK per direction (3+ consecutive same-dir same-ack)
+  for (const dir of ['up','dn']){
+    let run = [];
+    for (let i=0;i<pkts.length;i++){
+      if (pkts[i].dir!==dir) continue;
+      if (run.length && pkts[run[run.length-1]].ack === pkts[i].ack) run.push(i);
+      else { if (run.length>=3) run.forEach(j=>flags[j].frozen=true); run=[i]; }
+    }
+    if (run.length>=3) run.forEach(j=>flags[j].frozen=true);
+  }
+  const head = `<tr><th>#</th><th>t+Δ</th><th>dir</th><th>flags</th><th class="num">len</th><th class="num">seq</th><th class="num">ack</th><th class="num">win</th><th class="num">TSval</th><th class="num">TSecr</th><th class="num">ipId</th></tr>`;
+  const rows = pkts.map((p,i)=>{
+    const cls = flags[i].burst ? 'burst' : flags[i].frozen ? 'frozen' : '';
+    const dt = i ? (p.ts - pkts[i-1].ts)*1000 : 0;
+    const dtstr = i ? `+${dt.toFixed(2)}ms` : (p.ts-t0).toFixed(3)+'s';
+    return `<tr class="${cls}"><td>${i+1}</td><td>${dtstr}</td><td class="dir-${p.dir}">${p.dir==='up'?'→UP':'←DN'}</td><td>[${p.flags}]</td><td class="num">${p.len}</td><td class="num">${p.seq}</td><td class="num">${p.ack??''}</td><td class="num">${p.win??''}</td><td class="num">${p.tsv??''}</td><td class="num">${p.tse??''}</td><td class="num">${p.ipId}</td></tr>`;
+  }).join('');
+  el.innerHTML = head + rows;
+}
+
+// ---- fetch-based loader (runs/manifest.json + runs/manifest.local.json) ----
+
+// file:// is blocked by CORS for fetch(); surface a clear banner and stop.
+if (location.protocol === 'file:') {
+  document.getElementById('file-banner').style.display = 'block';
+  // Leave main-ui hidden. No further init.
+} else {
+  initApp();
+}
+
+async function fetchJson(url){
+  const r = await fetch(url, {cache: 'no-store'});
+  if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchText(url){
+  const r = await fetch(url, {cache: 'no-store'});
+  if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+  return r.text();
+}
+
+// Cache dump-text per file so re-selecting the same run is instant.
+const dumpCache = new Map();
+async function loadDump(file){
+  if (dumpCache.has(file)) return dumpCache.get(file);
+  const text = await fetchText(`runs/${file}`);
+  dumpCache.set(file, text);
+  return text;
+}
+
+// parsed-packets cache keyed by file path.
+const pktCache = new Map();
+function packetsFor(file, text){
+  if (pktCache.has(file)) return pktCache.get(file);
+  const pkts = tagDirection(parseDump(text));
+  pktCache.set(file, pkts);
+  return pkts;
+}
+
+let currentBaselinePkts = null;
+let currentBaselineStats = null;
+
+async function initApp(){
+  let manifest = null;
+  try {
+    manifest = await fetchJson('runs/manifest.json');
+  } catch (_e) {
+    // baseline manifest missing: OK — maybe only local runs exist.
+    manifest = {};
+  }
+  let local = {runs: []};
+  try {
+    local = await fetchJson('runs/manifest.local.json');
+  } catch (_e) {
+    // local manifest is optional; 404 is normal in a fresh clone.
+    local = {runs: []};
+  }
+  const baseline = manifest && manifest.baseline ? manifest.baseline : null;
+  const runs = Array.isArray(local.runs) ? local.runs.slice() : [];
+
+  if (!baseline && runs.length === 0) {
+    document.getElementById('empty-state').style.display = 'block';
+    return;
+  }
+
+  document.getElementById('main-ui').style.display = 'block';
+
+  // Baseline label (static — there's only ever one).
+  const blabel = document.getElementById('baseline-label');
+  if (baseline) {
+    const created = baseline.created || 'unknown';
+    blabel.textContent = `Baseline: udp2raw, captured ${created}`;
+  } else {
+    blabel.textContent = 'Baseline: отсутствует (запустите scripts/capture-baseline.sh)';
+    blabel.style.color = '#d7a86a';
+  }
+
+  // Pre-load baseline once so every run-switch reuses it.
+  if (baseline && baseline.file) {
+    try {
+      const text = await loadDump(baseline.file);
+      currentBaselinePkts = packetsFor(baseline.file, text);
+      currentBaselineStats = computeStats(currentBaselinePkts);
+      document.getElementById('title-baseline').textContent = `udp2raw (baseline)`;
+    } catch (e) {
+      console.error('baseline load failed', e);
+      document.getElementById('title-baseline').textContent = 'udp2raw (baseline) — load failed';
+    }
+  } else {
+    document.getElementById('title-baseline').textContent = 'udp2raw (baseline) — отсутствует';
+  }
+
+  // Populate run selector (newest first — assume manifest.local.json is already
+  // append-only; sort by created desc as a safety net).
+  const sel = document.getElementById('run-select');
+  runs.sort((a,b) => (b.created||'').localeCompare(a.created||''));
+  if (runs.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(нет локальных phantun-прогонов — запустите scripts/capture-run.sh)';
+    sel.appendChild(opt);
+    sel.disabled = true;
+  } else {
+    for (const r of runs) {
+      const opt = document.createElement('option');
+      opt.value = r.file;
+      const tag = r.git_sha ? ` [${r.git_sha}]` : '';
+      const note = r.notes ? ` — ${r.notes}` : '';
+      opt.textContent = `${r.created || r.file}${tag}${note}`;
+      opt.dataset.meta = JSON.stringify(r);
+      sel.appendChild(opt);
+    }
+  }
+
+  sel.addEventListener('change', () => selectRun(sel.value, runs));
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { if (sel.value) selectRun(sel.value, runs); }, 150);
+  });
+
+  if (runs.length > 0) {
+    sel.value = runs[0].file;
+    await selectRun(runs[0].file, runs);
+  } else if (currentBaselinePkts) {
+    // no phantun runs but baseline exists — still render baseline column.
+    renderColumn('baseline', currentBaselinePkts, currentBaselineStats, null);
+  }
+}
+
+function renderMeta(run){
+  const el = document.getElementById('run-meta');
+  if (!run) { el.innerHTML = ''; return; }
+  const parts = [];
+  if (run.created)    parts.push(`<span class="k">created</span><span class="v">${run.created}</span>`);
+  if (run.git_sha)    parts.push(`<span class="k">git_sha</span><span class="v">${run.git_sha}</span>`);
+  if (run.git_branch) parts.push(`<span class="k">git_branch</span><span class="v">${run.git_branch}</span>`);
+  if (run.notes)      parts.push(`<span class="k">notes</span><span class="v">${run.notes}</span>`);
+  if (run.file)       parts.push(`<span class="k">file</span><span class="v">${run.file}</span>`);
+  el.innerHTML = parts.join('');
+}
+
+async function selectRun(file, runs){
+  const run = runs.find(r => r.file === file);
+  renderMeta(run);
+  let pkts, stats;
+  try {
+    const text = await loadDump(file);
+    pkts = packetsFor(file, text);
+    stats = computeStats(pkts);
+  } catch (e) {
+    console.error('run load failed', e);
+    document.getElementById('title-selected').textContent = `phantun — load failed (${file})`;
+    return;
+  }
+  document.getElementById('title-selected').textContent = run ? `phantun [${run.git_sha || file}]` : `phantun [${file}]`;
+  renderColumn('selected', pkts, stats, currentBaselineStats);
+  if (currentBaselinePkts) {
+    renderColumn('baseline', currentBaselinePkts, currentBaselineStats, stats);
+  }
+}
+
+function renderColumn(which, pkts, stats, other){
+  renderStats(document.getElementById(`stats-${which}`), stats, other);
+  renderTimeline(document.getElementById(`tl-${which}`), pkts);
+  renderHistogram(document.getElementById(`hist-${which}`), stats);
+  renderSeqAck(document.getElementById(`seq-${which}`), pkts);
+  renderTable(document.getElementById(`tbl-${which}`), pkts);
+}
+</script>
+</body></html>

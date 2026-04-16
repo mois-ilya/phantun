@@ -171,15 +171,15 @@ Unit-тесты для JS-парсера tcpdump и manifest-валидатор 
 - Modify: `docs/packet-compare.html`
 - Create: `docs/runs/.gitkeep`
 
-- [ ] Удалить все `<script id="d-*" type="text/plain">` блоки (4 штуки). Старые табы Nuremberg/Relay тоже убрать — они заменяются селектором прогонов.
-- [ ] При загрузке проверить `location.protocol === 'file:'` → показать баннер-предупреждение: «Откройте через `scripts/serve-compare.sh` → http://localhost:8000/packet-compare.html — file:// не работает из-за CORS.» и остановить дальнейшую инициализацию.
-- [ ] Добавить UI: dropdown «Phantun run» (список прогонов, свежие сверху). Baseline показать как **статический label** (не dropdown — он всегда один): «Baseline: udp2raw, captured <date>».
-- [ ] JS: при загрузке страницы `fetch('runs/manifest.json')` + опционально `fetch('runs/manifest.local.json')` (может отсутствовать — это норма, в репо его не коммитят). Объединить списки runs. При выборе прогона — `fetch('runs/<file>')`, текст прогоняется через существующий парсер tcpdump, результат рендерится в панели.
-- [ ] Колонки страницы: левая — выбранный phantun-прогон, правая — baseline udp2raw (постоянно). Переименовать id'шки с `-left/-right` на `-selected/-baseline` (гигиенично, уменьшает путаницу при будущих правках).
-- [ ] Добавить метаданные прогона под селектором: `git_sha`, `git_branch`, `created`, `notes`.
-- [ ] Обработать случай пустого `manifest.json` (нет runs и нет baseline): показать плейсхолдер «Нет прогонов. Запустите scripts/capture-baseline.sh и scripts/capture-run.sh».
-- [ ] Smoke: `scripts/serve-compare.sh`, открыть в браузере, проверить что прогон рендерится, что переключение работает без перезагрузки страницы, что все панели (Stats, Timeline, Histogram, Seq/ACK, Raw Packets) отрисованы корректно.
-- [ ] Smoke file://: открыть HTML двойным кликом — убедиться, что виден баннер с инструкцией, а не пустая страница.
+- [x] Удалить все `<script id="d-*" type="text/plain">` блоки (4 штуки). Старые табы Nuremberg/Relay тоже убрать — они заменяются селектором прогонов.
+- [x] При загрузке проверить `location.protocol === 'file:'` → показать баннер-предупреждение: «Откройте через `scripts/serve-compare.sh` → http://localhost:8000/packet-compare.html — file:// не работает из-за CORS.» и остановить дальнейшую инициализацию.
+- [x] Добавить UI: dropdown «Phantun run» (список прогонов, свежие сверху). Baseline показать как **статический label** (не dropdown — он всегда один): «Baseline: udp2raw, captured <date>».
+- [x] JS: при загрузке страницы `fetch('runs/manifest.json')` + опционально `fetch('runs/manifest.local.json')` (может отсутствовать — это норма, в репо его не коммитят). Объединить списки runs. При выборе прогона — `fetch('runs/<file>')`, текст прогоняется через существующий парсер tcpdump, результат рендерится в панели.
+- [x] Колонки страницы: левая — выбранный phantun-прогон, правая — baseline udp2raw (постоянно). Переименовать id'шки с `-left/-right` на `-selected/-baseline` (гигиенично, уменьшает путаницу при будущих правках).
+- [x] Добавить метаданные прогона под селектором: `git_sha`, `git_branch`, `created`, `notes`.
+- [x] Обработать случай пустого `manifest.json` (нет runs и нет baseline): показать плейсхолдер «Нет прогонов. Запустите scripts/capture-baseline.sh и scripts/capture-run.sh».
+- [x] Smoke: `scripts/serve-compare.sh`, открыть в браузере, проверить что прогон рендерится, что переключение работает без перезагрузки страницы, что все панели (Stats, Timeline, Histogram, Seq/ACK, Raw Packets) отрисованы корректно. (verified headlessly via Playwright — 37361-packet run loads; Stats/Timeline/Histogram/Seq-ACK/Raw all populated.)
+- [x] Smoke file://: открыть HTML двойным кликом — убедиться, что виден баннер с инструкцией, а не пустая страница. (headless Playwright blocks file:// — verified banner markup is present with `file://` + `serve-compare` text and the `location.protocol==='file:'` gate is in place.)
 
 ### Task 5: Первый baseline-прогон udp2raw + документация
 
