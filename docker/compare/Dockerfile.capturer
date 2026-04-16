@@ -1,0 +1,5 @@
+# Capturer sidecar image — tcpdump is installed at build time so cold starts
+# don't race the generator's `sleep 3` sync.
+FROM alpine:3.19
+RUN apk add --no-cache tcpdump
+ENTRYPOINT ["/bin/sh"]

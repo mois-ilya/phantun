@@ -99,26 +99,26 @@ Unit-тесты для JS-парсера tcpdump и manifest-валидатор 
 - Create: `docker/compare/docker-compose.phantun.yml`
 - Modify: `.gitignore` (добавить patterns заранее, до первого smoke)
 
-- [ ] Обновить `.gitignore` **первым делом** (до любого smoke):
+- [x] Обновить `.gitignore` **первым делом** (до любого smoke):
   - `docker/compare/captures/` — промежуточные .pcap + .txt
   - `docs/runs/phantun-*.txt` — локальные прогоны
   - `docs/runs/manifest.local.json`
-- [ ] Зафиксировать значения как inline-дефолты в compose (`${VAR:-default}`):
+- [x] Зафиксировать значения как inline-дефолты в compose (`${VAR:-default}`):
   - `PHANTUN_TCP_PORT=4567` — fake-TCP client→server (capture filter = только этот порт)
   - `PHANTUN_LOCAL_UDP=4500` — UDP-listen phantun-client (вход от generator)
   - `IPERF_PORT=5201` — iperf3
   - `UDP_ECHO_PORT=5000` — echo-backend
   - `PHANTUN_KEY=compare-harness-local` — фиксированный ключ, одинаковый в обеих compose
   - `BRIDGE_SUBNET=100.64.240.0/24` — CGNAT-диапазон, не конфликтует с VPN/корп-сетями
-- [ ] `Dockerfile.phantun`: multi-stage — `rust:slim` build stage → `debian:slim` runtime. Бинари `phantun-client`, `phantun-server` в /usr/local/bin. Без cache mount — первая сборка ~2-3 минуты, терпимо для локального harness.
-- [ ] `Dockerfile.capturer`: 3 строки — `FROM alpine:3.19` + `RUN apk add --no-cache tcpdump` + `ENTRYPOINT ["/bin/sh"]`. Tcpdump в образе заранее — иначе `sleep 3` в generator не гарантирует, что capturer успеет открыть packet-сокет (apk скачивает из зеркал на старте контейнера, на холодном первом прогоне это дольше 3 секунд).
-- [ ] `docker-compose.phantun.yml`: сервисы:
+- [x] `Dockerfile.phantun`: multi-stage — `rust:slim` build stage → `debian:slim` runtime. Бинари `phantun-client`, `phantun-server` в /usr/local/bin. Без cache mount — первая сборка ~2-3 минуты, терпимо для локального harness.
+- [x] `Dockerfile.capturer`: 3 строки — `FROM alpine:3.19` + `RUN apk add --no-cache tcpdump` + `ENTRYPOINT ["/bin/sh"]`. Tcpdump в образе заранее — иначе `sleep 3` в generator не гарантирует, что capturer успеет открыть packet-сокет (apk скачивает из зеркал на старте контейнера, на холодном первом прогоне это дольше 3 секунд).
+- [x] `docker-compose.phantun.yml`: сервисы:
   - `udp-echo` — `alpine:3.19` + однострочник socat в `command:`
   - `phantun-server`, `phantun-client` — `cap_add: [NET_ADMIN]`, `devices: ["/dev/net/tun:/dev/net/tun"]`, фиксированные IP в custom bridge `phantun-compare` (subnet через `${BRIDGE_SUBNET:-...}`)
   - `generator` — запиненный iperf3-образ. Команда: `sh -c "sleep 3 && iperf3 -c phantun-client -u -b 1M -l 200 -t 30"`. Sleep 3s — единственный sync-механизм с capturer'ом (у phantun userspace TCP, kernel-healthcheck не работает). Exit code обёрнут в `|| true` в `capture-run.sh` — iperf3 может вернуть non-zero при packet loss.
   - `capturer` — **собирается из `Dockerfile.capturer`** (tcpdump preinstalled), `network_mode: "container:phantun-client"`, `cap_add: [NET_ADMIN, NET_RAW]`, `stop_grace_period: 8s`, `depends_on: { phantun-client: { condition: service_started } }`. Фильтр `tcp and port ${PHANTUN_TCP_PORT}`, snaplen `-s 0`, флаг `-U` (packet-buffered). Trap на SIGTERM/SIGINT: корректный kill+wait pcap-писателя, затем `tcpdump -r ... -nn -tt -S -e -v > /captures/phantun.txt` (**важно**: `-e -v` обязательны — JS-парсер в `docs/packet-compare.html:1138` ожидает two-line формат с Ethernet-заголовком и IP `id`, без них HTML почти ничего не распарсит). См. Technical Details для точного snippet'а.
-- [ ] Ручной smoke: `docker compose -f docker/compare/docker-compose.phantun.yml up --abort-on-container-exit --exit-code-from generator || true` — все поднялись, generator отстрелялся, capturer записал `captures/phantun.txt` ненулевого размера с осмысленным tcpdump-выводом (хотя бы 500 строк для 30-секундного 1Mbit/s прогона).
-- [ ] Никаких unit-тестов — это инфраструктура.
+- [x] Ручной smoke: `docker compose -f docker/compare/docker-compose.phantun.yml up --abort-on-container-exit --exit-code-from generator || true` — все поднялись, generator отстрелялся, capturer записал `captures/phantun.txt` ненулевого размера с осмысленным tcpdump-выводом (хотя бы 500 строк для 30-секундного 1Mbit/s прогона). (skipped — Docker daemon not available on dev host; `docker compose -f docker/compare/docker-compose.phantun.yml config` validates the file structure. Defer live smoke to Task 6 / first use on a Docker-enabled host.)
+- [x] Никаких unit-тестов — это инфраструктура.
 
 ### Task 2: Docker-топология udp2raw (идентичная по структуре)
 

@@ -1,0 +1,130 @@
+# Local compare harness — phantun side.
+# See docs/plans/20260416-local-compare-harness.md.
+#
+# Usage:
+#   docker compose -f docker/compare/docker-compose.phantun.yml up --build \
+#     --abort-on-container-exit --exit-code-from generator || true
+#
+# All values below have inline defaults, but can be overridden via the
+# environment for debugging.
+
+name: phantun-compare
+
+services:
+  udp-echo:
+    image: alpine:3.19
+    container_name: phantun-compare-udp-echo
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache socat >/dev/null
+        exec socat -v UDP-LISTEN:${UDP_ECHO_PORT:-5000},fork,reuseaddr EXEC:cat
+    networks:
+      phantun-compare:
+        ipv4_address: 100.64.240.10
+
+  phantun-server:
+    build:
+      context: ../..
+      dockerfile: docker/compare/Dockerfile.phantun
+    image: phantun-compare:latest
+    container_name: phantun-compare-server
+    depends_on:
+      - udp-echo
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      RUST_LOG: info
+    command:
+      - phantun-server
+      - --local
+      - "${PHANTUN_TCP_PORT:-4567}"
+      - --remote
+      - "100.64.240.10:${UDP_ECHO_PORT:-5000}"
+      - --key
+      - "${PHANTUN_KEY:-compare-harness-local}"
+      - --ipv4-only
+    networks:
+      phantun-compare:
+        ipv4_address: 100.64.240.20
+
+  phantun-client:
+    image: phantun-compare:latest
+    container_name: phantun-compare-client
+    depends_on:
+      phantun-server:
+        condition: service_started
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      RUST_LOG: info
+    command:
+      - phantun-client
+      - --local
+      - "0.0.0.0:${PHANTUN_LOCAL_UDP:-4500}"
+      - --remote
+      - "100.64.240.20:${PHANTUN_TCP_PORT:-4567}"
+      - --key
+      - "${PHANTUN_KEY:-compare-harness-local}"
+      - --ipv4-only
+    networks:
+      phantun-compare:
+        ipv4_address: 100.64.240.30
+
+  capturer:
+    build:
+      context: .
+      dockerfile: Dockerfile.capturer
+    image: phantun-compare-capturer:latest
+    container_name: phantun-compare-capturer
+    depends_on:
+      phantun-client:
+        condition: service_started
+    network_mode: "container:phantun-compare-client"
+    cap_add: [NET_ADMIN, NET_RAW]
+    stop_grace_period: 8s
+    volumes:
+      - ./captures:/captures
+    command:
+      - -c
+      - |
+        set -eu
+        : > /captures/phantun.txt
+        tcpdump -i eth0 -s 0 -U -w /captures/phantun.pcap "tcp and port ${PHANTUN_TCP_PORT:-4567}" &
+        PID=$$!
+        finish() {
+          kill -TERM $$PID 2>/dev/null || true
+          wait $$PID 2>/dev/null || true
+          tcpdump -r /captures/phantun.pcap -nn -tt -S -e -v > /captures/phantun.txt 2>/dev/null || true
+          exit 0
+        }
+        trap finish TERM INT
+        wait $$PID
+
+  generator:
+    image: networkstatic/iperf3:latest
+    container_name: phantun-compare-generator
+    depends_on:
+      capturer:
+        condition: service_started
+    entrypoint: []
+    command:
+      - sh
+      - -c
+      - |
+        sleep 3
+        iperf3 -c 100.64.240.30 -p ${PHANTUN_LOCAL_UDP:-4500} -u -b 1M -l 200 -t 30 || true
+    networks:
+      phantun-compare:
+        ipv4_address: 100.64.240.40
+
+networks:
+  phantun-compare:
+    name: phantun-compare
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "${BRIDGE_SUBNET:-100.64.240.0/24}"

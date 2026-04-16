@@ -2,3 +2,8 @@
 /.cargo
 /.cargo-home
 .claude/settings.local.json
+
+# Local compare harness (see docs/plans/20260416-local-compare-harness.md)
+docker/compare/captures/
+docs/runs/phantun-*.txt
+docs/runs/manifest.local.json

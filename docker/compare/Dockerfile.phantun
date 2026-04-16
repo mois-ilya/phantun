@@ -1,0 +1,36 @@
+# Dockerfile for phantun client/server used by the local compare harness.
+#
+# Builds both binaries from the current checkout and ships a minimal debian
+# runtime. No cache mount — first build is ~2–3 minutes, acceptable for a
+# local tool that is rebuilt only when phantun source changes.
+#
+# Usage is driven by docker-compose.phantun.yml; this image is not meant for
+# production.
+
+FROM rust:slim AS builder
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends pkg-config libssl-dev build-essential \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . /src
+
+RUN cargo build --release -p phantun \
+ && strip target/release/server target/release/client \
+ && install -Dm755 target/release/server /out/phantun-server \
+ && install -Dm755 target/release/client /out/phantun-client
+
+FROM debian:stable-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends iproute2 iptables ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/phantun-server /usr/local/bin/phantun-server
+COPY --from=builder /out/phantun-client /usr/local/bin/phantun-client
+
+ENV RUST_LOG=info
+
+# No ENTRYPOINT — the compose file supplies the command for each role (client
+# or server) so the same image covers both.
