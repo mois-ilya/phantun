@@ -202,11 +202,11 @@ Unit-тесты для JS-парсера tcpdump и manifest-валидатор 
 
 ### Task 6: Verify acceptance + cleanup
 
-- [ ] Прогнать все acceptance criteria из Overview вручную.
-- [ ] Убедиться что все chmod +x стоят на скриптах.
-- [ ] Убедиться что `docker compose down -v` отрабатывает чисто (не остаётся висящих контейнеров/томов после прогона).
-- [ ] Запустить полные тесты проекта (`./scripts/run-tests.sh`) — harness не должен ломать существующие тесты.
-- [ ] Переместить план в `docs/plans/completed/`.
+- [x] Прогнать все acceptance criteria из Overview вручную. **Результат:** baseline-udp2raw.txt существует (13 MB), `manifest.local.json` содержит 3 записи из Task 5 прогонов, `serve-compare.sh` отдаёт packet-compare.html + manifest.json + manifest.local.json + baseline по HTTP 200, селектор прогонов и file:// баннер/gate проверены в Task 4 через Playwright, детерминизм ±1 и чувствительность (phantun vs udp2raw) — в Task 5.
+- [x] Убедиться что все chmod +x стоят на скриптах. `ls -l scripts/capture-{run,baseline}.sh scripts/serve-compare.sh` — все три `rwxr-xr-x`.
+- [x] Убедиться что `docker compose down -v` отрабатывает чисто (не остаётся висящих контейнеров/томов после прогона). Прогнали up/down на phantun compose — `docker ps -a` и `docker volume ls` после teardown пусты по фильтрам `phantun-compare*` / `udp2raw-compare*`.
+- [x] Запустить полные тесты проекта (`./scripts/run-tests.sh`) — harness не должен ломать существующие тесты. **Результат:** `=== ALL TESTS PASSED ===`, exit 0.
+- [x] Переместить план в `docs/plans/completed/`.
 
 ## Technical Details
 
