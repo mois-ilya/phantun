@@ -4,16 +4,19 @@ body{font-family:Menlo,Consolas,monospace;background:#141414;color:#c9c9c9;paddi
 h1{font-size:1.1rem;color:#e8e8e8;margin-bottom:.2rem;letter-spacing:.05em;text-transform:uppercase}
 h2{font-size:.8rem;color:#aaa;margin:2rem 0 .5rem;text-transform:uppercase;letter-spacing:.1em}
 h3{font-size:.82rem;color:#c9c9c9;margin:1rem 0 .4rem}
-.subtitle{color:#888;font-size:.78rem;margin-bottom:1.5rem}
 .banner{background:#2a1e1e;border:1px solid #5a3a3a;color:#d7a86a;padding:12px 16px;margin-bottom:1.5rem;font-size:.8rem;line-height:1.6}
 .banner code{background:#1a1414;padding:1px 5px;color:#e8c9a0;border-radius:2px}
-.selector{display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-bottom:.5rem;padding:10px 14px;background:#181818;border:1px solid #222}
-.selector label{color:#888;font-size:.72rem;text-transform:uppercase;letter-spacing:.08em}
-.selector select{background:#1e1e1e;border:1px solid #2a2a2a;color:#e8e8e8;padding:5px 10px;font-family:inherit;font-size:.75rem;min-width:320px}
-.selector .baseline-label{color:#8fc98f;font-size:.75rem}
-.meta{font-size:.7rem;color:#888;margin-bottom:1.2rem;padding:6px 14px;background:#161616;border:1px solid #1e1e1e}
-.meta .k{color:#666;margin-right:4px}
-.meta .v{color:#c9c9c9;margin-right:14px;font-variant-numeric:tabular-nums}
+.header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:16px;padding:10px 14px;background:#181818;border:1px solid #222;margin-bottom:.5rem}
+.header-title{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px}
+.header-title h1{margin:0}
+.header-title .subtitle{color:#888;font-size:.78rem}
+.header-run{display:flex;align-items:center;gap:10px}
+.header-run label{color:#888;font-size:.72rem;text-transform:uppercase;letter-spacing:.08em}
+.header-run select{background:#1e1e1e;border:1px solid #2a2a2a;color:#e8e8e8;padding:5px 10px;font-family:inherit;font-size:.75rem;min-width:360px;max-width:100%}
+.info-strip{display:flex;flex-wrap:wrap;align-items:center;gap:12px;font-size:.7rem;color:#888;margin-bottom:1.2rem;padding:6px 14px;background:#161616;border:1px solid #1e1e1e}
+.info-strip .baseline-label{color:#8fc98f}
+.info-strip .info-divider{color:#333}
+.info-strip .meta-inline{color:#c9c9c9;font-variant-numeric:tabular-nums;word-break:break-all}
 .empty{padding:24px;text-align:center;color:#888;font-size:.8rem;background:#181818;border:1px dashed #2a2a2a;margin-bottom:1.5rem}
 .cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .col{background:#181818;border:1px solid #222;padding:14px}
@@ -36,7 +39,18 @@ td.dir-up{color:#d7a86a}
 td.dir-dn{color:#6aaed7}
 tr.burst td{background:#2a1e1e}
 tr.frozen td{background:#1e1e2a}
-.tbl-wrap{max-height:360px;overflow:auto;border:1px solid #222;background:#111}
+tr.split td{background:#2a2618}
+#tbl-merged th.col-udp{background:#1a2230;color:#8fa0c9}
+#tbl-merged th.col-phantun{background:#1e2a1e;color:#8fc98f}
+#tbl-merged th.col-udp2raw{background:#2a1e1e;color:#d7a86a}
+#tbl-merged th.col-divider{width:2px;padding:0;background:#0a0a0a}
+#tbl-merged td.col-divider{background:#0a0a0a;padding:0;width:2px}
+#tbl-merged td.group{border-left:none;border-right:none}
+#tbl-merged td.empty{padding:3px 6px;text-align:center;color:#444;font-size:.72rem;background:transparent;border:none;border-bottom:1px solid #1e1e1e;margin:0}
+#tbl-merged td.kind{font-size:.65rem;color:#888;text-transform:uppercase;letter-spacing:.06em}
+.udp-unavail{color:#d7a86a;margin-left:6px;display:none}
+.udp-unavail.on{display:inline}
+.tbl-wrap{border:1px solid #222;background:#111}
 .histbar{fill:#6aaed7}
 .histbar.up{fill:#d7a86a}
 .hist-label{font-size:9px}
@@ -45,8 +59,23 @@ details{margin-top:1.5rem}
 summary{cursor:pointer;font-size:.78rem;color:#aaa;padding:6px 0;text-transform:uppercase;letter-spacing:.08em}
 .note{margin-top:10px;padding:8px 12px;border-left:2px solid #3a5a3a;background:#161e16;font-size:.72rem;color:#6a8a6a;line-height:1.6}
 </style></head><body>
-<h1>TCP Dump Compare</h1>
-<p class="subtitle">phantun vs udp2raw — визуальная диагностика отличий в TCP-потоке. Выберите phantun-прогон слева, baseline udp2raw — справа (статический).</p>
+<div class="header">
+  <div class="header-title">
+    <h1>TCP Dump Compare</h1>
+    <span class="subtitle">· phantun vs udp2raw — диагностика TCP-фингерпринта</span>
+  </div>
+  <div class="header-run">
+    <label for="run-select">Phantun run</label>
+    <select id="run-select"></select>
+  </div>
+</div>
+
+<div id="info-strip" class="info-strip" style="display:none">
+  <span class="baseline-label" id="baseline-label">Baseline: не выбран</span>
+  <span class="udp-unavail" id="udp-unavail">· UDP column unavailable (run pre-dates UDP capture)</span>
+  <span class="info-divider">│</span>
+  <span class="meta-inline" id="run-meta"></span>
+</div>
 
 <div id="file-banner" class="banner" style="display:none">
   Откройте через <code>scripts/serve-compare.sh</code> → <code>http://localhost:8000/packet-compare.html</code> — <code>file://</code> не работает из-за CORS.
@@ -57,12 +86,6 @@ summary{cursor:pointer;font-size:.78rem;color:#aaa;padding:6px 0;text-transform:
 </div>
 
 <div id="main-ui" style="display:none">
-  <div class="selector">
-    <label for="run-select">Phantun run</label>
-    <select id="run-select"></select>
-    <span class="baseline-label" id="baseline-label">Baseline: не выбран</span>
-  </div>
-  <div class="meta" id="run-meta"></div>
 
   <div class="cols">
     <div class="col" id="col-selected">
@@ -96,11 +119,14 @@ summary{cursor:pointer;font-size:.78rem;color:#aaa;padding:6px 0;text-transform:
   </div>
 
   <div class="note">
-    <strong>Подсветка в таблице:</strong> красная строка = burst (≥3 пакетов от одной стороны за &lt;1 мс); синяя строка = frozen ACK/TSecr (ack не меняется ≥3 подряд у одной стороны). Hover по точкам таймлайна — подробности пакета.
+    <strong>Только UP-направление:</strong> таблица показывает детерминированный UDP-вход и его TCP-обёртку в обоих стеках. DN-поведение — в чартах выше; сводные числа по DN, pcap loss и retx — в строке ниже. Orphan-строки = handshake / heartbeat / pure-ACK / retx. Красная td = burst (≥3 пакетов одной стороны за &lt;1 мс), синяя td = frozen ACK (≥3 подряд с тем же ack).
   </div>
 
-  <details open><summary>Raw packet table (selected phantun)</summary><div class="tbl-wrap"><table id="tbl-selected"></table></div></details>
-  <details><summary>Raw packet table (baseline udp2raw)</summary><div class="tbl-wrap"><table id="tbl-baseline"></table></div></details>
+  <div id="merge-summary" class="info-strip" style="display:none;margin-top:10px"></div>
+
+  <details open><summary>Raw packets (UDP · phantun · udp2raw)</summary>
+    <div class="tbl-wrap"><table id="tbl-merged"></table></div>
+  </details>
 </div>
 
 <div class="tip" id="tip"></div>
@@ -142,6 +168,39 @@ function parseDump(text){
         tsv:  ts ? +ts[1] : null,
         tse:  ts ? +ts[2] : null,
         len:  len ? +len[1] : 0,
+      });
+      meta = null;
+    }
+  }
+  return packets;
+}
+
+// UDP tcpdump output. Line 2 may be "UDP, length N" for normal ports or
+// "NONESP-encap: …" when tcpdump mis-labels port 4500 as IKE NAT-T —
+// in that case the length is absent from line 2, so we always pull it from
+// the IP total-length field on line 1 (minus IPv4(20)+UDP(8) headers).
+function parseUdpDump(text){
+  const lines = text.split('\n');
+  const packets = [];
+  let meta = null;
+  for (const ln of lines) {
+    const m1 = ln.match(/^(\d+)\.(\d+)\s+[0-9a-f:]+\s+>\s+[0-9a-f:]+,.*?length\s+(\d+):.*?id\s+(\d+).*?proto UDP\s*\(\d+\),\s*length\s+(\d+)/);
+    if (m1) {
+      const ipLen = +m1[5];
+      meta = {
+        ts: parseInt(m1[1]) + parseInt(m1[2])/1e6,
+        ethLen: +m1[3],
+        ipId: +m1[4],
+        len: ipLen - 28,
+      };
+      continue;
+    }
+    const m2 = ln.match(/^\s+([\d.]+|\[[\da-f:]+\])\.(\d+)\s+>\s+([\d.]+|\[[\da-f:]+\])\.(\d+):/);
+    if (m2 && meta) {
+      packets.push({
+        ts: meta.ts, ethLen: meta.ethLen, ipId: meta.ipId,
+        src: m2[1], sport: +m2[2], dst: m2[3], dport: +m2[4],
+        len: meta.len,
       });
       meta = null;
     }
@@ -384,34 +443,255 @@ function renderSeqAck(svg, pkts){
   svg.appendChild(leg);
 }
 
-function renderTable(el, pkts){
-  const t0 = pkts[0]?.ts || 0;
-  // compute burst / frozen-ack flags per packet
-  const flags = pkts.map(()=>({burst:false, frozen:false}));
-  for (let i=2;i<pkts.length;i++){
-    if (pkts[i].dir===pkts[i-1].dir && pkts[i].dir===pkts[i-2].dir){
-      const dt1 = pkts[i].ts - pkts[i-1].ts, dt2 = pkts[i-1].ts - pkts[i-2].ts;
-      if (dt1<0.001 && dt2<0.001){ flags[i].burst=flags[i-1].burst=flags[i-2].burst=true; }
+// Envelope overhead constants. phantun wraps each UDP as [IV 8][marker 1][body];
+// Overhead functions: udp_len → expected tcp_len.
+//   phantun: flat +9 (8-byte IV + 1-byte marker).
+//   udp2raw: +50 rounded up to the next multiple of 8 (udp2raw pads its wrapped
+//   payload to 8-byte boundaries — observed 220B UDP → 272B TCP, which is +52
+//   instead of +50 because 270 isn't a multiple of 8). Empirically verified
+//   against the actual baseline: 78→128, 110→160, 142→192, 220→272, 254→304,
+//   1374→1424 — all match `ceil_8(udp + 50)`.
+const PHANTUN_EXPECTED = u => u + 9;
+const UDP2RAW_EXPECTED = u => { const x = u + 50; return (x + 7) & ~7; };
+
+// Walk TCP packets of a given direction and pair each with the next same-direction
+// UDP whose size matches `tcp.len === udp.len + overhead` exactly. TCP packets of
+// the OTHER direction are skipped entirely (not treated as orphans of this pass),
+// so callers can run two passes (up + dn) and union the orphan sets safely.
+// Non-matching same-dir TCP (heartbeat, protocol init, pure ACKs) become orphans.
+// UDP cursor advances only on exact match, so a drop / split shows as a cluster
+// of orphans rather than a silent mis-pairing.
+function pairTcpToUdp(udpDir, tcpPkts, expectedFn, dir){
+  const pairs = new Map();   // tcp index → udp index
+  const orphans = new Set(); // tcp indices with no UDP partner
+  let udpCursor = 0;
+  for (let i = 0; i < tcpPkts.length; i++) {
+    const tp = tcpPkts[i];
+    if (tp.dir !== dir) continue;
+    if (tp.len === 0) { orphans.add(i); continue; }
+    const expected = udpCursor < udpDir.length ? expectedFn(udpDir[udpCursor].len) : null;
+    if (expected !== null && tp.len === expected) {
+      pairs.set(i, udpCursor);
+      udpCursor++;
+    } else {
+      orphans.add(i);
     }
   }
-  // frozen ACK per direction (3+ consecutive same-dir same-ack)
-  for (const dir of ['up','dn']){
+  return { pairs, orphans };
+}
+
+// Build merged row list. Data rows = {udp: UDP#n, phantun: matched phantun-TCP,
+// udp2raw: matched udp2raw-TCP} — three cells aligned by size-match pairing.
+// Orphan rows = one cell each: TCP packets with no UDP partner (handshake,
+// heartbeat, down-ACKs, FIN) and UDP-down echo responses. All rows sorted by
+// relative timestamp — phantun+UDP share a clock (same capture sidecar),
+// udp2raw lives on its own timeline (separate capture run).
+function buildRows(udpPhPkts, udpU2Pkts, phantunPkts, udp2rawPkts){
+  // Only UP is put into the merged table: the replay generator produces a
+  // deterministic UDP UP sequence, so both tunnels see identical input sizes
+  // and a simple dataIndex anchor works. DN is intentionally NOT shown —
+  // phantun-side and udp2raw-side run in separate captures with different
+  // clocks + pcap loss + udp2raw userspace retx, so any row-level DN
+  // alignment is synthetic. DN behaviour is covered by the per-stack charts
+  // above and the numeric summary strip.
+  const _ = udpU2Pkts; // intentionally unused here (used by summary builder)
+  const udpPhList = udpPhPkts || [];
+  const phList    = phantunPkts || [];
+  const u2List    = udp2rawPkts || [];
+
+  const udpPhUp = udpPhList.filter(p => p.dir === 'up');
+  const phPairUp = pairTcpToUdp(udpPhUp, phList, PHANTUN_EXPECTED, 'up');
+  const u2PairUp = pairTcpToUdp(udpPhUp, u2List, UDP2RAW_EXPECTED, 'up');
+
+  const phByUdpUp = new Map();
+  for (const [ti, ui] of phPairUp.pairs) phByUdpUp.set(ui, phList[ti]);
+  const u2ByUdpUp = new Map();
+  for (const [ti, ui] of u2PairUp.pairs) u2ByUdpUp.set(ui, u2List[ti]);
+
+  // Each stack has its own capture clock; orphan rows fall back to each
+  // stack's own t0. UP data rows use phantun's UDP clock as anchor.
+  const phSideTs = [];
+  if (udpPhList.length) phSideTs.push(udpPhList[0].ts);
+  if (phList.length)    phSideTs.push(phList[0].ts);
+  const phSideT0 = phSideTs.length ? Math.min(...phSideTs) : 0;
+  const u2SideT0 = u2List.length ? u2List[0].ts : 0;
+
+  const rows = [];
+  for (let n = 0; n < udpPhUp.length; n++) {
+    rows.push({
+      kind: 'data',
+      index: n + 1,
+      _rel: udpPhUp[n].ts - phSideT0,
+      udp: udpPhUp[n],
+      phantun: phByUdpUp.get(n) || null,
+      udp2raw: u2ByUdpUp.get(n) || null,
+    });
+  }
+  // Orphans we keep in the table (small, fingerprint-relevant count):
+  //   - UP-direction TCP that didn't pair  — handshake UP, heartbeat UP, retx
+  //   - DN-direction len=0 control frames  — SYN-ACK, pure ACK, FIN-ACK
+  // DN-direction data (len>0) is dropped; its volume and clock drift across
+  // stacks would swamp the table.
+  const pushOrphans = (list, upOrphanIdx, stack, t0) => {
+    for (const i of upOrphanIdx) {
+      rows.push({ kind: 'orphan', _rel: list[i].ts - t0, [stack]: list[i] });
+    }
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].dir === 'dn' && list[i].len === 0) {
+        rows.push({ kind: 'orphan', _rel: list[i].ts - t0, [stack]: list[i] });
+      }
+    }
+  };
+  pushOrphans(phList, phPairUp.orphans, 'phantun', phSideT0);
+  pushOrphans(u2List, u2PairUp.orphans, 'udp2raw', u2SideT0);
+
+  rows.sort((a, b) => a._rel - b._rel);
+  return rows;
+}
+
+// Numeric summary of what went where — shown above the merged table so the
+// operator doesn't have to count rows. Captures the things we DON'T put in
+// the table (DN data volume, retx count) so nothing fingerprint-relevant is
+// invisible.
+function computeMergeSummary(udpPhPkts, udpU2Pkts, phantunPkts, udp2rawPkts){
+  const udpPhList = udpPhPkts || [];
+  const udpU2List = udpU2Pkts || [];
+  const phList    = phantunPkts || [];
+  const u2List    = udp2rawPkts || [];
+  const udpPhUp   = udpPhList.filter(p => p.dir === 'up').length;
+  const udpPhDn   = udpPhList.filter(p => p.dir === 'dn').length;
+  const udpU2Dn   = udpU2List.filter(p => p.dir === 'dn').length;
+  const udpPhUpList = udpPhList.filter(p => p.dir === 'up');
+  const phPairUp  = pairTcpToUdp(udpPhUpList, phList, PHANTUN_EXPECTED, 'up');
+  const u2PairUp  = pairTcpToUdp(udpPhUpList, u2List, UDP2RAW_EXPECTED, 'up');
+  // Duplicate-(dir,seq,len) proxy for userspace retx. Cheap, not exact —
+  // a stack that rewrites seq on retransmit would evade this.
+  const countDupSeq = (list) => {
+    const seen = new Set();
+    let dups = 0;
+    for (const p of list) {
+      if (p.seq == null || p.len === 0) continue;
+      const k = `${p.dir}|${p.seq}|${p.len}`;
+      if (seen.has(k)) dups++; else seen.add(k);
+    }
+    return dups;
+  };
+  const countCtrl = (list) => list.filter(p => p.dir === 'dn' && p.len === 0).length;
+  return {
+    udpPhUp, udpPhDn, udpU2Dn,
+    phPaired: phPairUp.pairs.size,
+    u2Paired: u2PairUp.pairs.size,
+    phUpOrph: phPairUp.orphans.size,
+    u2UpOrph: u2PairUp.orphans.size,
+    phDnCtrl: countCtrl(phList),
+    u2DnCtrl: countCtrl(u2List),
+    phDupSeq: countDupSeq(phList),
+    u2DupSeq: countDupSeq(u2List),
+  };
+}
+
+function renderMergeSummary(el, s){
+  if (!s) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = 'flex';
+  const warn = (v) => v > 0 ? 'color:#d7a86a' : '';
+  const parts = [
+    `<span>UP paired: <b>ph ${s.phPaired}/${s.udpPhUp}</b> · <b>u2 ${s.u2Paired}/${s.udpPhUp}</b></span>`,
+    `<span class="info-divider">│</span>`,
+    `<span>UP orphans (handshake/HB/retx): <b>ph ${s.phUpOrph}</b> · <b>u2 ${s.u2UpOrph}</b></span>`,
+    `<span class="info-divider">│</span>`,
+    `<span>DN ctrl (len=0): ph ${s.phDnCtrl} · u2 ${s.u2DnCtrl}</span>`,
+    `<span class="info-divider">│</span>`,
+    `<span>DN UDP received: ph ${s.udpPhDn} · u2 ${s.udpU2Dn}</span>`,
+    `<span class="info-divider">│</span>`,
+    `<span style="${warn(s.u2DupSeq + s.phDupSeq)}">TCP dup-seq (≈retx): ph ${s.phDupSeq} · u2 ${s.u2DupSeq}</span>`,
+  ];
+  el.innerHTML = parts.join('');
+}
+
+function renderMergedTable(el, rows, hasUdp){
+  // Burst (≥3 adjacent pkts in same stream within 1ms) — per column.
+  const markBurst = (getPkt) => {
+    const flags = rows.map(()=>false);
     let run = [];
-    for (let i=0;i<pkts.length;i++){
-      if (pkts[i].dir!==dir) continue;
-      if (run.length && pkts[run[run.length-1]].ack === pkts[i].ack) run.push(i);
-      else { if (run.length>=3) run.forEach(j=>flags[j].frozen=true); run=[i]; }
+    for (let i=0;i<rows.length;i++){
+      const p = getPkt(rows[i]);
+      if (!p) { if (run.length>=3) run.forEach(j=>flags[j]=true); run=[]; continue; }
+      if (run.length) {
+        const prev = getPkt(rows[run[run.length-1]]);
+        if (p.ts - prev.ts < 0.001) { run.push(i); continue; }
+      }
+      if (run.length>=3) run.forEach(j=>flags[j]=true);
+      run = [i];
     }
-    if (run.length>=3) run.forEach(j=>flags[j].frozen=true);
+    if (run.length>=3) run.forEach(j=>flags[j]=true);
+    return flags;
+  };
+  // Frozen ACK (≥3 adjacent same-stream packets with identical ack) — per column.
+  const markFrozen = (getPkt) => {
+    const flags = rows.map(()=>false);
+    let run = [];
+    for (let i=0;i<rows.length;i++){
+      const p = getPkt(rows[i]);
+      if (!p || p.ack == null) { if (run.length>=3) run.forEach(j=>flags[j]=true); run=[]; continue; }
+      if (run.length && getPkt(rows[run[run.length-1]]).ack === p.ack) run.push(i);
+      else { if (run.length>=3) run.forEach(j=>flags[j]=true); run=[i]; }
+    }
+    if (run.length>=3) run.forEach(j=>flags[j]=true);
+    return flags;
+  };
+  const phBurst  = markBurst(r  => r.phantun || null);
+  const u2Burst  = markBurst(r  => r.udp2raw || null);
+  const phFrozen = markFrozen(r => r.phantun || null);
+  const u2Frozen = markFrozen(r => r.udp2raw || null);
+
+  const divider = `<th class="col-divider"></th>`;
+  const dividerTd = `<td class="col-divider"></td>`;
+  const groupHead =
+    (hasUdp ? `<th class="col-udp" colspan="4">UDP</th>${divider}` : '') +
+    `<th class="col-phantun" colspan="7">phantun TCP</th>${divider}` +
+    `<th class="col-udp2raw" colspan="7">udp2raw TCP</th>`;
+  const subHead =
+    (hasUdp ? `<th class="col-udp">#</th><th class="col-udp">dir</th><th class="col-udp">t+Δ</th><th class="col-udp num">len</th>${divider}` : '') +
+    `<th class="col-phantun">dir</th><th class="col-phantun">flags</th><th class="col-phantun num">len</th><th class="col-phantun num">seq</th><th class="col-phantun num">ack</th><th class="col-phantun num">win</th><th class="col-phantun num">TSval</th>${divider}` +
+    `<th class="col-udp2raw">dir</th><th class="col-udp2raw">flags</th><th class="col-udp2raw num">len</th><th class="col-udp2raw num">seq</th><th class="col-udp2raw num">ack</th><th class="col-udp2raw num">win</th><th class="col-udp2raw num">TSval</th>`;
+  const head = `<tr>${groupHead}</tr><tr>${subHead}</tr>`;
+
+  const tcpCell = (pkt, burst, frozen) => {
+    if (!pkt) return `<td class="empty" colspan="7">—</td>`;
+    const cls = [burst ? 'burst' : '', frozen ? 'frozen' : ''].filter(Boolean).join(' ');
+    const c = cls ? ` class="${cls}"` : '';
+    return `<td class="dir-${pkt.dir}${cls ? ' '+cls : ''}">${pkt.dir==='up'?'→UP':'←DN'}</td>`
+      + `<td${c}>[${pkt.flags}]</td>`
+      + `<td class="num${cls ? ' '+cls : ''}">${pkt.len}</td>`
+      + `<td class="num${cls ? ' '+cls : ''}">${pkt.seq ?? ''}</td>`
+      + `<td class="num${cls ? ' '+cls : ''}">${pkt.ack ?? ''}</td>`
+      + `<td class="num${cls ? ' '+cls : ''}">${pkt.win ?? ''}</td>`
+      + `<td class="num${cls ? ' '+cls : ''}">${pkt.tsv ?? ''}</td>`;
+  };
+  const udpCell = (pkt, dtStr, idx) => {
+    if (!pkt) return hasUdp ? `<td class="empty" colspan="4">—</td>` : '';
+    const dirLabel = pkt.dir === 'up' ? '→UP' : pkt.dir === 'dn' ? '←DN' : '';
+    return `<td class="num">${idx ?? ''}</td><td class="dir-${pkt.dir || ''}">${dirLabel}</td><td>${dtStr}</td><td class="num">${pkt.len}</td>`;
+  };
+
+  const fragments = [];
+  let prev = 0;
+  for (let i=0;i<rows.length;i++){
+    const r = rows[i];
+    const dt = i ? (r._rel - prev) * 1000 : r._rel * 1000;
+    const dtStr = i ? `+${dt.toFixed(2)}ms` : `${r._rel.toFixed(3)}s`;
+    prev = r._rel;
+    const rowCls = r.split ? 'split' : '';
+    const udpTd = hasUdp ? udpCell(r.udp, r.udp ? dtStr : '', r.index) : '';
+    fragments.push(
+      `<tr class="${rowCls}">` +
+        udpTd + (hasUdp ? dividerTd : '') +
+        tcpCell(r.phantun, phBurst[i], phFrozen[i]) + dividerTd +
+        tcpCell(r.udp2raw, u2Burst[i], u2Frozen[i]) +
+      `</tr>`
+    );
   }
-  const head = `<tr><th>#</th><th>t+Δ</th><th>dir</th><th>flags</th><th class="num">len</th><th class="num">seq</th><th class="num">ack</th><th class="num">win</th><th class="num">TSval</th><th class="num">TSecr</th><th class="num">ipId</th></tr>`;
-  const rows = pkts.map((p,i)=>{
-    const cls = flags[i].burst ? 'burst' : flags[i].frozen ? 'frozen' : '';
-    const dt = i ? (p.ts - pkts[i-1].ts)*1000 : 0;
-    const dtstr = i ? `+${dt.toFixed(2)}ms` : (p.ts-t0).toFixed(3)+'s';
-    return `<tr class="${cls}"><td>${i+1}</td><td>${dtstr}</td><td class="dir-${p.dir}">${p.dir==='up'?'→UP':'←DN'}</td><td>[${p.flags}]</td><td class="num">${p.len}</td><td class="num">${p.seq}</td><td class="num">${p.ack??''}</td><td class="num">${p.win??''}</td><td class="num">${p.tsv??''}</td><td class="num">${p.tse??''}</td><td class="num">${p.ipId}</td></tr>`;
-  }).join('');
-  el.innerHTML = head + rows;
+  el.innerHTML = head + fragments.join('');
 }
 
 // ---- fetch-based loader (runs/manifest.json + runs/manifest.local.json) ----
@@ -453,8 +733,35 @@ function packetsFor(file, text){
   return pkts;
 }
 
+// UDP-capture text+pkt caches mirror the TCP ones above.
+const udpDumpCache = new Map();
+async function loadUdpDump(file){
+  if (udpDumpCache.has(file)) return udpDumpCache.get(file);
+  const text = await fetchText(`runs/${file}`);
+  udpDumpCache.set(file, text);
+  return text;
+}
+const udpPktCache = new Map();
+function udpPacketsFor(file, text){
+  if (udpPktCache.has(file)) return udpPktCache.get(file);
+  const pkts = parseUdpDump(text);
+  // UDP packets don't have flags/seq/ack; tag direction by sport-vs-dport
+  // heuristic: the port that's always the same (listener side) is "down" (reply),
+  // the ephemeral port that opens the flow is "up". For the generator→client
+  // stream that's 100.64.240.40.<ephemeral> → 100.64.240.30.4500 = up.
+  if (pkts.length) {
+    const listener = `${pkts[0].dst}:${pkts[0].dport}`;
+    for (const p of pkts) {
+      p.dir = `${p.dst}:${p.dport}` === listener ? 'up' : 'dn';
+    }
+  }
+  udpPktCache.set(file, pkts);
+  return pkts;
+}
+
 let currentBaselinePkts = null;
 let currentBaselineStats = null;
+let currentBaselineUdpPkts = null;
 
 async function initApp(){
   let manifest = null;
@@ -480,12 +787,13 @@ async function initApp(){
   }
 
   document.getElementById('main-ui').style.display = 'block';
+  document.getElementById('info-strip').style.display = 'flex';
 
   // Baseline label (static — there's only ever one).
   const blabel = document.getElementById('baseline-label');
   if (baseline) {
     const created = baseline.created || 'unknown';
-    blabel.textContent = `Baseline: udp2raw, captured ${created}`;
+    blabel.textContent = `Baseline: udp2raw @ ${created}`;
   } else {
     blabel.textContent = 'Baseline: отсутствует (запустите scripts/capture-baseline.sh)';
     blabel.style.color = '#d7a86a';
@@ -501,6 +809,15 @@ async function initApp(){
     } catch (e) {
       console.error('baseline load failed', e);
       document.getElementById('title-baseline').textContent = 'udp2raw (baseline) — load failed';
+    }
+    if (baseline.udp_file) {
+      try {
+        const udpText = await loadUdpDump(baseline.udp_file);
+        currentBaselineUdpPkts = udpPacketsFor(baseline.udp_file, udpText);
+      } catch (e) {
+        console.error('baseline udp load failed', e);
+        currentBaselineUdpPkts = null;
+      }
     }
   } else {
     document.getElementById('title-baseline').textContent = 'udp2raw (baseline) — отсутствует';
@@ -546,14 +863,14 @@ async function initApp(){
 
 function renderMeta(run){
   const el = document.getElementById('run-meta');
-  if (!run) { el.innerHTML = ''; return; }
-  const parts = [];
-  if (run.created)    parts.push(`<span class="k">created</span><span class="v">${run.created}</span>`);
-  if (run.git_sha)    parts.push(`<span class="k">git_sha</span><span class="v">${run.git_sha}</span>`);
-  if (run.git_branch) parts.push(`<span class="k">git_branch</span><span class="v">${run.git_branch}</span>`);
-  if (run.notes)      parts.push(`<span class="k">notes</span><span class="v">${run.notes}</span>`);
-  if (run.file)       parts.push(`<span class="k">file</span><span class="v">${run.file}</span>`);
-  el.innerHTML = parts.join('');
+  if (!run) { el.textContent = ''; return; }
+  const vals = [];
+  if (run.git_sha)    vals.push(run.git_sha);
+  if (run.git_branch) vals.push(run.git_branch);
+  if (run.created)    vals.push(run.created);
+  if (run.notes)      vals.push(`"${run.notes}"`);
+  if (run.file)       vals.push(run.file);
+  el.textContent = vals.join(' · ');
 }
 
 async function selectRun(file, runs){
@@ -570,6 +887,7 @@ async function selectRun(file, runs){
     // from a previously-selected run for fresh data under a failure title.
     clearColumn('selected');
     document.getElementById('title-selected').textContent = `phantun — load failed (${file})`;
+    document.getElementById('tbl-merged').innerHTML = '';
     return;
   }
   document.getElementById('title-selected').textContent = run ? `phantun [${run.git_sha || file}]` : `phantun [${file}]`;
@@ -577,6 +895,28 @@ async function selectRun(file, runs){
   if (currentBaselinePkts) {
     renderColumn('baseline', currentBaselinePkts, currentBaselineStats, stats);
   }
+  // Merged-table load: try UDP capture for this run. Missing udp_file or
+  // baseline-side udp is a soft fallback — show the badge, skip UDP column.
+  let runUdpPkts = null;
+  const unavailEl = document.getElementById('udp-unavail');
+  if (run && run.udp_file) {
+    try {
+      const udpText = await loadUdpDump(run.udp_file);
+      runUdpPkts = udpPacketsFor(run.udp_file, udpText);
+    } catch (e) {
+      console.error('run udp load failed', e);
+      runUdpPkts = null;
+    }
+  }
+  const hasUdp = !!(runUdpPkts && currentBaselineUdpPkts);
+  unavailEl.classList.toggle('on', !hasUdp);
+  const udpForMerge = hasUdp ? runUdpPkts : null;
+  const rows = buildRows(udpForMerge, currentBaselineUdpPkts, pkts, currentBaselinePkts);
+  renderMergedTable(document.getElementById('tbl-merged'), rows, hasUdp);
+  const summary = hasUdp
+    ? computeMergeSummary(udpForMerge, currentBaselineUdpPkts, pkts, currentBaselinePkts)
+    : null;
+  renderMergeSummary(document.getElementById('merge-summary'), summary);
 }
 
 function renderColumn(which, pkts, stats, other){
@@ -584,7 +924,6 @@ function renderColumn(which, pkts, stats, other){
   renderTimeline(document.getElementById(`tl-${which}`), pkts);
   renderHistogram(document.getElementById(`hist-${which}`), stats);
   renderSeqAck(document.getElementById(`seq-${which}`), pkts);
-  renderTable(document.getElementById(`tbl-${which}`), pkts);
 }
 
 function clearColumn(which){
@@ -594,8 +933,6 @@ function clearColumn(which){
     const svg = document.getElementById(`${prefix}-${which}`);
     if (svg) while (svg.firstChild) svg.removeChild(svg.firstChild);
   }
-  const tbl = document.getElementById(`tbl-${which}`);
-  if (tbl) tbl.innerHTML = '';
 }
 </script>
 </body></html>

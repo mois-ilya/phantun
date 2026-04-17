@@ -44,6 +44,7 @@ COMPOSE_FILE="$REPO_ROOT/docker/compare/docker-compose.udp2raw.yml"
 CAPTURES_DIR="$REPO_ROOT/docker/compare/captures"
 RUNS_DIR="$REPO_ROOT/docs/runs"
 BASELINE_FILE="$RUNS_DIR/baseline-udp2raw.txt"
+BASELINE_UDP_FILE="$RUNS_DIR/baseline-udp2raw-udp.txt"
 MANIFEST="$RUNS_DIR/manifest.json"
 
 if [ ! -f "$COMPOSE_FILE" ]; then
@@ -72,7 +73,8 @@ fi
 # Drop any leftovers from a prior run: if the capturer container fails to
 # start (image build broken, port collision, Docker daemon hiccup) the old
 # files would otherwise survive on the host and be copied as "fresh" data.
-rm -f "$CAPTURES_DIR"/udp2raw.pcap "$CAPTURES_DIR"/udp2raw.txt
+rm -f "$CAPTURES_DIR"/udp2raw.pcap "$CAPTURES_DIR"/udp2raw.txt \
+      "$CAPTURES_DIR"/udp2raw-udp.pcap "$CAPTURES_DIR"/udp2raw-udp.txt
 
 cleanup() {
     docker compose -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1 || true
@@ -91,28 +93,33 @@ COMPOSE_RC=$?
 set -e
 
 CAPTURE_SRC="$CAPTURES_DIR/udp2raw.txt"
-if [ ! -s "$CAPTURE_SRC" ]; then
-    echo "error: capture file $CAPTURE_SRC missing or empty (docker compose exit code: $COMPOSE_RC)" >&2
-    exit 1
-fi
-
-if ! grep -q 'IPv4' "$CAPTURE_SRC"; then
-    echo "error: capture file $CAPTURE_SRC has no parsable 'IPv4' lines" >&2
-    exit 1
-fi
+CAPTURE_SRC_UDP="$CAPTURES_DIR/udp2raw-udp.txt"
+for src in "$CAPTURE_SRC" "$CAPTURE_SRC_UDP"; do
+    if [ ! -s "$src" ]; then
+        echo "error: capture file $src missing or empty (docker compose exit code: $COMPOSE_RC)" >&2
+        exit 1
+    fi
+    if ! grep -q 'IPv4' "$src"; then
+        echo "error: capture file $src has no parsable 'IPv4' lines" >&2
+        exit 1
+    fi
+done
 
 cp "$CAPTURE_SRC" "$BASELINE_FILE"
+cp "$CAPTURE_SRC_UDP" "$BASELINE_UDP_FILE"
 echo "==> saved baseline: docs/runs/$(basename "$BASELINE_FILE")"
+echo "==> saved baseline: docs/runs/$(basename "$BASELINE_UDP_FILE")"
 
 CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 PHANTUN_TCP_PORT="${PHANTUN_TCP_PORT:-4567}"
+PHANTUN_LOCAL_UDP="${PHANTUN_LOCAL_UDP:-4500}"
 
-python3 - "$MANIFEST" "$(basename "$BASELINE_FILE")" "$CREATED" "$PHANTUN_TCP_PORT" <<'PY'
+python3 - "$MANIFEST" "$(basename "$BASELINE_FILE")" "$(basename "$BASELINE_UDP_FILE")" "$CREATED" "$PHANTUN_TCP_PORT" "$PHANTUN_LOCAL_UDP" <<'PY'
 import json
 import os
 import sys
 
-manifest_path, file_name, created, tcp_port = sys.argv[1:5]
+manifest_path, file_name, udp_file_name, created, tcp_port, udp_port = sys.argv[1:7]
 
 if os.path.exists(manifest_path):
     with open(manifest_path, "r", encoding="utf-8") as fh:
@@ -122,11 +129,13 @@ else:
 
 manifest["baseline"] = {
     "file": file_name,
+    "udp_file": udp_file_name,
     "created": created,
     "tool_version": "udp2raw 20230206.0 (commit e5ecd33ec4c25d499a14213a5d1dbd5d21e0dd63)",
-    "generator": "python3 UDP constant-rate 1Mbit/s 200B 30s (625 pps)",
+    "generator": "UDP replay of docker/compare/awg-replay.jsonl (AmneziaWG client, 600 pkts / ~1.36s)",
     "capture_point": "udp2raw-client eth0 (bridge side)",
     "capture_filter": f"tcp and port {tcp_port}",
+    "capture_filter_udp": f"udp and port {udp_port}",
 }
 
 with open(manifest_path, "w", encoding="utf-8") as fh:
@@ -136,6 +145,7 @@ PY
 
 echo "==> updated docs/runs/manifest.json"
 
-rm -f "$CAPTURES_DIR"/udp2raw.pcap "$CAPTURES_DIR"/udp2raw.txt
+rm -f "$CAPTURES_DIR"/udp2raw.pcap "$CAPTURES_DIR"/udp2raw.txt \
+      "$CAPTURES_DIR"/udp2raw-udp.pcap "$CAPTURES_DIR"/udp2raw-udp.txt
 
 echo "==> done"

@@ -7,3 +7,11 @@
 docker/compare/captures/
 docs/runs/phantun-*.txt
 docs/runs/manifest.local.json
+
+# macOS Finder metadata
+.DS_Store
+
+# Debug screenshots from Playwright/manual compare-harness runs (committed
+# screenshots should live in docs/ explicitly).
+/*.png
+.playwright-mcp/

@@ -744,6 +744,7 @@ dependencies = [
  "nix",
  "num_cpus",
  "pretty_env_logger",
+ "rand",
  "socket2",
  "tokio",
  "tokio-tun",

@@ -64,7 +64,8 @@ mkdir -p "$CAPTURES_DIR" "$RUNS_DIR"
 # Drop any leftovers from a prior run: if the capturer container fails to
 # start (image build broken, port collision, Docker daemon hiccup) the old
 # files would otherwise survive on the host and be copied as "fresh" data.
-rm -f "$CAPTURES_DIR"/phantun.pcap "$CAPTURES_DIR"/phantun.txt
+rm -f "$CAPTURES_DIR"/phantun.pcap "$CAPTURES_DIR"/phantun.txt \
+      "$CAPTURES_DIR"/phantun-udp.pcap "$CAPTURES_DIR"/phantun-udp.txt
 
 cleanup() {
     docker compose -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1 || true
@@ -84,15 +85,17 @@ COMPOSE_RC=$?
 set -e
 
 CAPTURE_SRC="$CAPTURES_DIR/phantun.txt"
-if [ ! -s "$CAPTURE_SRC" ]; then
-    echo "error: capture file $CAPTURE_SRC missing or empty (docker compose exit code: $COMPOSE_RC)" >&2
-    exit 1
-fi
-
-if ! grep -q 'IPv4' "$CAPTURE_SRC"; then
-    echo "error: capture file $CAPTURE_SRC has no parsable 'IPv4' lines" >&2
-    exit 1
-fi
+CAPTURE_SRC_UDP="$CAPTURES_DIR/phantun-udp.txt"
+for src in "$CAPTURE_SRC" "$CAPTURE_SRC_UDP"; do
+    if [ ! -s "$src" ]; then
+        echo "error: capture file $src missing or empty (docker compose exit code: $COMPOSE_RC)" >&2
+        exit 1
+    fi
+    if ! grep -q 'IPv4' "$src"; then
+        echo "error: capture file $src has no parsable 'IPv4' lines" >&2
+        exit 1
+    fi
+done
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
@@ -102,21 +105,27 @@ CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 BASE="phantun-${TS}-${SHA}"
 DEST="$RUNS_DIR/${BASE}.txt"
 SUFFIX=2
-while [ -e "$DEST" ]; do
+# Bump suffix if either TCP or UDP sidecar file already exists — they share
+# one suffix so a row in manifest.local.json always has a matching udp_file.
+while [ -e "$DEST" ] || [ -e "${DEST%.txt}-udp.txt" ]; do
     DEST="$RUNS_DIR/${BASE}-${SUFFIX}.txt"
     SUFFIX=$((SUFFIX + 1))
 done
+DEST_UDP="${DEST%.txt}-udp.txt"
 
 cp "$CAPTURE_SRC" "$DEST"
+cp "$CAPTURE_SRC_UDP" "$DEST_UDP"
 DEST_NAME="$(basename "$DEST")"
+DEST_UDP_NAME="$(basename "$DEST_UDP")"
 echo "==> saved capture: docs/runs/$DEST_NAME"
+echo "==> saved capture: docs/runs/$DEST_UDP_NAME"
 
-python3 - "$MANIFEST" "$DEST_NAME" "$CREATED" "$SHA" "$BRANCH" "$NOTES" <<'PY'
+python3 - "$MANIFEST" "$DEST_NAME" "$DEST_UDP_NAME" "$CREATED" "$SHA" "$BRANCH" "$NOTES" <<'PY'
 import json
 import os
 import sys
 
-manifest_path, file_name, created, sha, branch, notes = sys.argv[1:7]
+manifest_path, file_name, udp_file_name, created, sha, branch, notes = sys.argv[1:8]
 
 if os.path.exists(manifest_path):
     with open(manifest_path, "r", encoding="utf-8") as fh:
@@ -127,6 +136,7 @@ else:
 runs = manifest.setdefault("runs", [])
 runs.append({
     "file": file_name,
+    "udp_file": udp_file_name,
     "created": created,
     "git_sha": sha,
     "git_branch": branch,
@@ -140,6 +150,7 @@ PY
 
 echo "==> updated docs/runs/manifest.local.json"
 
-rm -f "$CAPTURES_DIR"/phantun.pcap "$CAPTURES_DIR"/phantun.txt
+rm -f "$CAPTURES_DIR"/phantun.pcap "$CAPTURES_DIR"/phantun.txt \
+      "$CAPTURES_DIR"/phantun-udp.pcap "$CAPTURES_DIR"/phantun-udp.txt
 
 echo "==> done"

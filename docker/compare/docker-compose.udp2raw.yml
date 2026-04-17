@@ -17,15 +17,26 @@
 name: udp2raw-compare
 
 services:
+  # Python UDP echo (matches phantun-compose verbatim): strict 1-in/1-out via
+  # SOCK_DGRAM. Replaced socat+cat to avoid socat's pipe-based merge artifacts.
   udp-echo:
-    image: alpine:3.19
+    image: python:3.12-alpine
     container_name: udp2raw-compare-udp-echo
+    environment:
+      UDP_ECHO_PORT: "${UDP_ECHO_PORT:-5000}"
     command:
       - sh
       - -c
       - |
-        apk add --no-cache socat >/dev/null
-        exec socat -v UDP4-LISTEN:${UDP_ECHO_PORT:-5000},fork,reuseaddr EXEC:cat
+        exec python3 -u -c '
+        import socket, os
+        port = int(os.environ["UDP_ECHO_PORT"])
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("0.0.0.0", port))
+        while True:
+            data, addr = s.recvfrom(65535)
+            s.sendto(data, addr)
+        '
     networks:
       udp2raw-compare:
         ipv4_address: 100.64.240.10
@@ -104,21 +115,26 @@ services:
       - |
         set -eu
         : > /captures/udp2raw.txt
-        tcpdump -i eth0 -s 0 -U -w /captures/udp2raw.pcap "tcp and port ${PHANTUN_TCP_PORT:-4567}" &
-        PID=$$!
+        : > /captures/udp2raw-udp.txt
+        tcpdump -i eth0 -s 0 -B 16384 -U -w /captures/udp2raw.pcap "tcp and port ${PHANTUN_TCP_PORT:-4567}" &
+        TCP_PID=$$!
+        tcpdump -i eth0 -s 0 -B 16384 -U -w /captures/udp2raw-udp.pcap "udp and port ${PHANTUN_LOCAL_UDP:-4500}" &
+        UDP_PID=$$!
         finish() {
-          kill -TERM $$PID 2>/dev/null || true
-          wait $$PID 2>/dev/null || true
+          kill -TERM $$TCP_PID $$UDP_PID 2>/dev/null || true
+          wait $$TCP_PID 2>/dev/null || true
+          wait $$UDP_PID 2>/dev/null || true
           tcpdump -r /captures/udp2raw.pcap -nn -tt -S -e -v > /captures/udp2raw.txt 2>/dev/null || true
+          tcpdump -r /captures/udp2raw-udp.pcap -nn -tt -S -e -v > /captures/udp2raw-udp.txt 2>/dev/null || true
           exit 0
         }
         trap finish TERM INT
-        wait $$PID
+        wait
 
-  # Constant-rate UDP generator. iperf3 can't be used because it opens a TCP
-  # control channel that phantun/udp2raw (UDP-only tunnels) can't forward. A
-  # small Python loop delivers the same ~1 Mbit/s, 200-byte-payload, 30-second
-  # pattern the plan calls for, without any TCP dependency.
+  # UDP replay generator. Replays ./awg-replay.jsonl — a captured AmneziaWG
+  # client-side UDP stream (see scripts/extract-replay.py) — preserving real
+  # packet sizes and inter-arrival timing. Identical to the phantun side so
+  # both stacks see the same input.
   generator:
     image: python:3.12-alpine
     container_name: udp2raw-compare-generator
@@ -129,40 +145,35 @@ services:
     environment:
       TARGET_HOST: "100.64.240.30"
       TARGET_PORT: "${PHANTUN_LOCAL_UDP:-4500}"
-      BITRATE_BPS: "1000000"
-      PAYLOAD_BYTES: "200"
-      DURATION_S: "30"
       STARTUP_DELAY_S: "3"
+    volumes:
+      - ./awg-replay.jsonl:/replay.jsonl:ro
     command:
       - sh
       - -c
       - |
         sleep "$$STARTUP_DELAY_S"
         exec python3 -u -c '
-        import os, socket, time
+        import os, socket, time, json
         host = os.environ["TARGET_HOST"]
         port = int(os.environ["TARGET_PORT"])
-        bps = int(os.environ["BITRATE_BPS"])
-        size = int(os.environ["PAYLOAD_BYTES"])
-        dur = float(os.environ["DURATION_S"])
-        interval = size * 8 / bps
-        payload = bytes(size)
+        with open("/replay.jsonl") as fh:
+            steps = [json.loads(l) for l in fh if l.strip()]
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        next_send = time.monotonic()
-        end = next_send + dur
+        base = time.monotonic()
         sent = 0
-        while True:
-            now = time.monotonic()
-            if now >= end:
-                break
-            sock.sendto(payload, (host, port))
+        sent_bytes = 0
+        for step in steps:
+            target = base + step["t_ms"]/1000.0
+            dt = target - time.monotonic()
+            if dt > 0:
+                time.sleep(dt)
+            sock.sendto(bytes(step["len"]), (host, port))
             sent += 1
-            next_send += interval
-            delay = next_send - time.monotonic()
-            if delay > 0:
-                time.sleep(delay)
-        print(f"generator: sent {sent} packets in {dur:.0f}s "
-              f"({sent*size*8/dur/1000:.1f} kbit/s)")
+            sent_bytes += step["len"]
+        dur = steps[-1]["t_ms"]/1000.0 if steps else 0.0
+        print(f"generator: replayed {sent} packets ({sent_bytes}B payload) "
+              f"over {dur:.2f}s")
         '
     networks:
       udp2raw-compare:
